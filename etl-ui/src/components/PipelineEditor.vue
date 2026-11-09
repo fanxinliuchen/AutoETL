@@ -673,20 +673,14 @@
                                 v-model:checked="pagination.enabled"
                                 checked-children="已开启"
                                 un-checked-children="未开启"
-                                @change="syncPagination"
+                                @change="onPaginationToggle"
                               />
                             </a-form-item>
                           </a-col>
                           <a-col :span="6">
                             <a-form-item label="每页条数 (limit)">
-                              <a-input-number
-                                v-model:value="pagination.pageSize"
-                                :min="1"
-                                :max="10000"
-                                :disabled="!pagination.enabled"
-                                style="width: 100%"
-                                @change="syncPagination"
-                              />
+                              <a-input :value="pagination.pageSize" disabled />
+                              <div class="fk-hint">跟随上方「单次抓取上限」联动</div>
                             </a-form-item>
                           </a-col>
                           <a-col :span="6">
@@ -717,7 +711,7 @@
                         </a-row>
 
                         <a-row :gutter="16">
-                          <a-col :span="6">
+                          <a-col :span="8">
                             <a-form-item label="起始偏移">
                               <a-input-number
                                 v-model:value="pagination.start"
@@ -728,7 +722,7 @@
                               />
                             </a-form-item>
                           </a-col>
-                          <a-col :span="6">
+                          <a-col :span="8">
                             <a-form-item label="增长间隔">
                               <a-input-number
                                 v-model:value="pagination.step"
@@ -741,7 +735,7 @@
                               <div class="fk-hint">0 表示与每页条数相同</div>
                             </a-form-item>
                           </a-col>
-                          <a-col :span="6">
+                          <a-col :span="8">
                             <a-form-item label="结束条件：本页条数 <">
                               <a-input-number
                                 v-model:value="pagination.endWhenLessThan"
@@ -752,42 +746,6 @@
                                 @change="syncPagination"
                               />
                               <div class="fk-hint">0 表示与每页条数相同</div>
-                            </a-form-item>
-                          </a-col>
-                          <a-col :span="6">
-                            <a-form-item label="偏移量字段路径">
-                              <a-input
-                                v-model:value="pagination.offsetPath"
-                                :disabled="!pagination.enabled"
-                                placeholder="data.StartRow"
-                                @change="syncPagination"
-                              />
-                            </a-form-item>
-                          </a-col>
-                        </a-row>
-
-                        <a-row :gutter="16">
-                          <a-col :span="6">
-                            <a-form-item label="每页条数字段路径">
-                              <a-input
-                                v-model:value="pagination.limitPath"
-                                :disabled="!pagination.enabled"
-                                placeholder="data.Limit"
-                                @change="syncPagination"
-                              />
-                            </a-form-item>
-                          </a-col>
-                          <a-col :span="18">
-                            <a-form-item label="配置预览">
-                              <div class="fk-hint" style="margin-top: 0; line-height: 1.9">
-                                每轮把
-                                <code>{{ pagination.offsetPath || 'data.StartRow' }}</code>
-                                写成「起始偏移 + 第几页 × 增长间隔」，并把
-                                <code>{{ pagination.limitPath || 'data.Limit' }}</code>
-                                写成每页条数；某页返回条数小于结束阈值即停止。
-                                金蝶 ExecuteBillQuery / BillQuery 的请求体默认就是
-                                <code>data.StartRow</code> 与 <code>data.Limit</code>。
-                              </div>
                             </a-form-item>
                           </a-col>
                         </a-row>
@@ -1459,6 +1417,16 @@ const loadPagination = () => {
       pagination.value = defaultPagination()
     }
   }
+  // 每页条数以「单次抓取上限」为准，避免两处配置不一致
+  pagination.value.pageSize = kingdeeQuery.value.limit || pagination.value.pageSize || 2000
+}
+
+// 开启分页时先把每页条数对齐到单次抓取上限
+const onPaginationToggle = () => {
+  if (pagination.value.enabled) {
+    pagination.value.pageSize = kingdeeQuery.value.limit || 2000
+  }
+  syncPagination()
 }
 
 // ===== 抽取字段清单（表格编辑 + Excel 导入导出） =====
@@ -1619,6 +1587,15 @@ const syncKingdeeQueryToBody = () => {
     null,
     2
   )
+
+  // 每页条数与「单次抓取上限」联动，避免两处配置打架
+  const limit = kingdeeQuery.value.limit || 2000
+  if (pagination.value.pageSize !== limit) {
+    pagination.value.pageSize = limit
+    if (pagination.value.enabled) {
+      syncPagination()
+    }
+  }
 }
 
 // 由 FieldKeys 串重建表格行（保留已存在行的中文名/类型/启用/备注）
