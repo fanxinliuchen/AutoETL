@@ -66,14 +66,20 @@ public class WebApiExtractor {
 
         logBuffer.append(String.format("[WebAPI] 数据拉取地址: %s, 方式: %s\n", apiUrl, method));
 
+        // 日期变量在后端解析（${today-60d} 等），保证定时运行时始终取最新区间
+        String requestBody = DateVarResolver.resolve(pipeline.getApiBody());
+        if (StrUtil.isNotBlank(requestBody) && !requestBody.equals(pipeline.getApiBody())) {
+            logBuffer.append(String.format("[WebAPI] 日期变量已解析，实际请求体: %s\n", StrUtil.brief(requestBody, 300)));
+        }
+
         // 分页配置存在且启用时走分页循环，否则保持原有单次请求
         PaginationConfig pagination = PaginationConfig.parse(pipeline.getApiPagination());
         if (pagination != null) {
-            return extractPaged(pipeline, headers, apiUrl, method, jsonPath, pagination, logBuffer);
+            return extractPaged(requestBody, headers, apiUrl, method, jsonPath, pagination, logBuffer);
         }
 
-        List<String> fieldKeys = parseFieldKeysFromRequestBody(pipeline.getApiBody());
-        String body = sendOnce(apiUrl, method, headers, pipeline.getApiBody());
+        List<String> fieldKeys = parseFieldKeysFromRequestBody(requestBody);
+        String body = sendOnce(apiUrl, method, headers, requestBody);
         logBuffer.append(String.format("[WebAPI] 响应成功，数据长度: %d 字符\n", body != null ? body.length() : 0));
 
         List<Map<String, Object>> records = parseRecords(body, jsonPath, fieldKeys);
@@ -84,7 +90,7 @@ public class WebApiExtractor {
     /**
      * 偏移量分页抽取：每轮改写请求体中的偏移/每页条数，直到本页条数小于结束阈值或达到取数上限
      */
-    private List<Map<String, Object>> extractPaged(EtlPipeline pipeline,
+    private List<Map<String, Object>> extractPaged(String requestBody,
                                                    Map<String, String> headers,
                                                    String apiUrl,
                                                    String method,
@@ -94,18 +100,18 @@ public class WebApiExtractor {
         if (!"POST".equals(method)) {
             throw new BizException(ErrorCode.PARAM_ERROR, "分页取数目前仅支持 POST 请求体方式");
         }
-        if (StrUtil.isBlank(pipeline.getApiBody())) {
+        if (StrUtil.isBlank(requestBody)) {
             throw new BizException(ErrorCode.PARAM_ERROR, "分页取数要求填写请求体 Body");
         }
 
         JSONObject baseBody;
         try {
-            baseBody = JSONUtil.parseObj(pipeline.getApiBody());
+            baseBody = JSONUtil.parseObj(requestBody);
         } catch (Exception e) {
             throw new BizException(ErrorCode.PARAM_ERROR, "分页取数要求请求体为合法 JSON: " + e.getMessage());
         }
 
-        List<String> fieldKeys = parseFieldKeysFromRequestBody(pipeline.getApiBody());
+        List<String> fieldKeys = parseFieldKeysFromRequestBody(requestBody);
         List<Map<String, Object>> all = new ArrayList<>();
 
         logBuffer.append(String.format(
@@ -156,6 +162,55 @@ public class WebApiExtractor {
     }
 
     /**
+     * 识别金蝶业务层错误。
+     *
+     * <p>金蝶在参数错误（如字段名不存在）时仍返回 HTTP 200，只是把
+     * ResponseStatus.IsSuccess 置为 false。若不拦截，这段错误对象会被当成
+     * 一条正常记录载入临时表，导致"静默脏数据"，比直接报错更危险。
+     */
+    private void assertBusinessSuccess(String body) {
+        if (StrUtil.isBlank(body) || !body.trim().startsWith("{")) {
+            return;
+        }
+        try {
+            JSONObject root = JSONUtil.parseObj(body);
+            JSONObject status = null;
+            Object result = root.get("Result");
+            if (result instanceof JSONObject resultObj) {
+                Object inner = resultObj.get("ResponseStatus");
+                status = inner instanceof JSONObject ? (JSONObject) inner : null;
+            }
+            if (status == null) {
+                Object direct = root.get("ResponseStatus");
+                status = direct instanceof JSONObject ? (JSONObject) direct : null;
+            }
+            if (status == null || !Boolean.FALSE.equals(status.getBool("IsSuccess"))) {
+                return;
+            }
+            StringBuilder message = new StringBuilder();
+            Object errors = status.get("Errors");
+            if (errors instanceof List<?> list) {
+                for (Object item : list) {
+                    if (item instanceof JSONObject err) {
+                        String msg = err.getStr("Message");
+                        if (StrUtil.isNotBlank(msg)) {
+                            message.append(message.length() > 0 ? "；" : "").append(msg);
+                        }
+                    }
+                }
+            }
+            if (message.length() == 0) {
+                message.append("未知业务错误");
+            }
+            throw new BizException(ErrorCode.ETL_EXECUTE_ERROR, "金蝶返回业务错误: " + message);
+        } catch (BizException be) {
+            throw be;
+        } catch (Exception ignored) {
+            // 非标准应答结构不阻断解析
+        }
+    }
+
+    /**
      * 发送一次请求并返回响应体
      */
     private String sendOnce(String apiUrl, String method, Map<String, String> headers, String body) {
@@ -184,6 +239,7 @@ public class WebApiExtractor {
      * 按 JsonPath 解析响应，支持对象数组与金蝶二维数组两种形态
      */
     private List<Map<String, Object>> parseRecords(String body, String jsonPath, List<String> fieldKeys) {
+        assertBusinessSuccess(body);
         Object extracted = JsonPath.read(body, jsonPath);
         List<Map<String, Object>> records = new ArrayList<>();
 

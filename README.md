@@ -194,6 +194,13 @@ pnpm dev
   * 支持注入鉴权 Header（如 `{"Authorization": "Bearer token"}`）及 JSON 请求体模板。
   * 采用 JsonPath 灵活提取数组节点（例如 `$.data.records` 或 `$.result.list`）。
   * 内置 **SSRF 安全防护**，拦截内网私有 IP 探测。
+  * **过滤条件支持多字段多条件**：
+    * 结构化模式逐行配置「连接符(AND/OR) · 字段 · 操作符 · 值类型 · 值」，操作符含 `= <> > >= < <= LIKE NOT LIKE IN NOT IN IS NULL IS NOT NULL`。
+    * 值类型支持文本、数字、**日期变量**、原始表达式；日期变量可选「今天/昨天/此刻 + 偏移天数」，生成 `${today-60d}` 形式的占位符。
+    * **日期变量在后端解析**：每次执行时才计算成真实日期（如 60 天前 ~ 今天），保证定时任务每天跑的都是最新区间；执行日志会打印解析后的完整请求体。
+    * 条件配置随流程保存在 `t_etl_pipeline.filter_meta`；老流程只有 FilterString 时会尝试自动解析成条件行。
+    * 保留「文本模式」，可直接手写 FilterString，切回结构化时自动解析。
+  * **金蝶业务错误会被拦截**：金蝶参数错误（如字段名不存在）仍返回 HTTP 200，只是把 `ResponseStatus.IsSuccess` 置为 false。系统会识别并抛出具体错误，避免把错误对象当成一条正常数据写进临时表。
   * **偏移量分页取数**（`api_pagination`，适用于金蝶等数据量大的接口）：
 
     | 配置项 | 说明 | 默认 |

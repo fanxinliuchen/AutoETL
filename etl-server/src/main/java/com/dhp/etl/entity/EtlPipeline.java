@@ -57,6 +57,9 @@ public class EtlPipeline extends BaseTenantEntity {
     /** WebAPI源: 请求体模板 */
     private String apiBody;
 
+    /** 过滤条件结构化配置 JSON（多字段多条件，用于生成 FilterString） */
+    private String filterMeta;
+
     /** WebAPI源: JsonPath 结果路径 如 $.data.records */
     private String apiDataPath;
 

@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS t_etl_pipeline (
     api_method       VARCHAR(16)  NULL,
     api_headers      JSON         NULL,
     api_body         TEXT         NULL,
+    filter_meta      TEXT         NULL,
     api_data_path    VARCHAR(128) NULL,
     api_pagination   JSON         NULL,
     transform_sql    MEDIUMTEXT   NULL,

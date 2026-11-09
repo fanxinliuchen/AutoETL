@@ -80,6 +80,7 @@ CREATE TABLE t_etl_pipeline (
     api_method       VARCHAR(16)  NULL     COMMENT 'WebAPI源: GET/POST',
     api_headers      JSON         NULL     COMMENT 'WebAPI源: 请求头JSON',
     api_body         TEXT         NULL     COMMENT 'WebAPI源: 请求体JSON/模板',
+    filter_meta      TEXT         NULL     COMMENT '过滤条件结构化配置JSON(多字段多条件)',
     api_data_path    VARCHAR(128) NULL     COMMENT 'WebAPI源: JsonPath结果路径 如 $.data.records',
     api_pagination   JSON         NULL     COMMENT 'WebAPI源: 分页配置JSON',
 

@@ -73,6 +73,7 @@ export interface EtlPipeline {
   apiMethod?: 'GET' | 'POST'
   apiHeaders?: string
   apiBody?: string
+  filterMeta?: string
   apiDataPath?: string
   apiPagination?: string
   transformSql: string

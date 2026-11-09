@@ -605,25 +605,148 @@
                     </a-modal>
 
                     <a-row :gutter="16">
-                      <a-col :span="12">
+                      <a-col :span="24">
                         <a-form-item label="过滤条件 (FilterString)">
-                          <a-input
-                            v-model:value="kingdeeQuery.filterString"
-                            placeholder="例如：FDate >= '${yesterday}' AND FDocumentStatus = 'C'"
-                            @change="syncKingdeeQueryToBody"
-                          />
+                          <div class="fk-toolbar">
+                            <span class="fk-count">
+                              {{ filterConditions.length }} 个条件 ·
+                              {{ filterMode === 'table' ? '结构化' : '文本' }}模式
+                            </span>
+                            <a-space :size="6">
+                              <a-button
+                                v-if="filterMode === 'table'"
+                                size="small"
+                                @click="addFilterCondition"
+                              >
+                                <plus-outlined /> 添加条件
+                              </a-button>
+                              <a-button size="small" type="link" @click="switchFilterMode">
+                                {{ filterMode === 'table' ? '切换到文本模式' : '切换到结构化' }}
+                              </a-button>
+                            </a-space>
+                          </div>
                         </a-form-item>
                       </a-col>
-                      <a-col :span="6">
+                    </a-row>
+
+                    <div v-if="filterMode === 'table'" class="filt-panel">
+                      <div v-for="(row, index) in filterConditions" :key="row.rid" class="filt-row">
+                        <a-select
+                          v-if="index > 0"
+                          v-model:value="row.connector"
+                          size="small"
+                          style="width: 78px; flex: none"
+                          :options="[
+                            { label: 'AND', value: 'AND' },
+                            { label: 'OR', value: 'OR' }
+                          ]"
+                          @change="applyFilterConditions"
+                        />
+                        <span v-else class="filt-where">WHERE</span>
+                        <a-input
+                          v-model:value="row.field"
+                          size="small"
+                          list="filter-field-list"
+                          class="fk-input-mono"
+                          placeholder="字段名，如 FDocumentStatus"
+                          style="flex: 1; min-width: 180px"
+                          @change="applyFilterConditions"
+                        />
+                        <a-select
+                          v-model:value="row.op"
+                          size="small"
+                          style="width: 116px; flex: none"
+                          :options="FILTER_OPS.map((o) => ({ label: o, value: o }))"
+                          @change="applyFilterConditions"
+                        />
+                        <template v-if="needsFilterValue(row.op)">
+                          <a-select
+                            v-model:value="row.valueType"
+                            size="small"
+                            style="width: 108px; flex: none"
+                            :options="FILTER_VALUE_TYPES"
+                            @change="applyFilterConditions"
+                          />
+                          <template v-if="row.valueType === 'DATE'">
+                            <a-select
+                              v-model:value="row.dateBase"
+                              size="small"
+                              style="width: 88px; flex: none"
+                              :options="[
+                                { label: '今天', value: 'today' },
+                                { label: '昨天', value: 'yesterday' },
+                                { label: '此刻', value: 'now' }
+                              ]"
+                              @change="applyFilterConditions"
+                            />
+                            <a-input-number
+                              v-model:value="row.dateOffset"
+                              size="small"
+                              style="width: 110px; flex: none"
+                              addon-after="天"
+                              @change="applyFilterConditions"
+                            />
+                          </template>
+                          <a-input
+                            v-else
+                            v-model:value="row.value"
+                            size="small"
+                            style="flex: 1; min-width: 150px"
+                            :placeholder="
+                              row.valueType === 'RAW'
+                                ? '原始表达式，如 0 或 CURDATE()'
+                                : row.op.toUpperCase().includes('IN')
+                                  ? '多个值用英文逗号分隔'
+                                  : '条件值'
+                            "
+                            @change="applyFilterConditions"
+                          />
+                        </template>
+                        <div v-else style="flex: 1"></div>
+                        <a-button
+                          size="small"
+                          type="link"
+                          danger
+                          style="flex: none"
+                          @click="removeFilterCondition(index)"
+                        >
+                          删除
+                        </a-button>
+                      </div>
+                      <div v-if="!filterConditions.length" class="filt-empty">
+                        尚未添加条件，点击右上角「+ 添加条件」
+                      </div>
+                      <div class="filt-preview">
+                        生成：<code>{{ kingdeeQuery.filterString || '（空）' }}</code>
+                      </div>
+                      <datalist id="filter-field-list">
+                        <option v-for="opt in filterFieldOptions" :key="opt.value" :value="opt.value" />
+                      </datalist>
+                    </div>
+                    <div v-else class="filt-panel">
+                      <a-textarea
+                        v-model:value="kingdeeQuery.filterString"
+                        :rows="3"
+                        class="code-textarea"
+                        placeholder="例如：FModifyDate >= '${today-60d}' AND FDocumentStatus = 'C'"
+                        @change="syncKingdeeQueryToBody"
+                      />
+                      <div class="fk-hint">
+                        文本模式原样写入 FilterString；切回结构化时会尝试解析成条件行。
+                      </div>
+                    </div>
+
+                    <a-row :gutter="16">
+                      <a-col :span="12">
                         <a-form-item label="排序规则 (OrderString)">
                           <a-input
                             v-model:value="kingdeeQuery.orderString"
-                            placeholder="例如：FID DESC"
+                            placeholder="例如：FBillNo ASC"
                             @change="syncKingdeeQueryToBody"
                           />
                         </a-form-item>
                       </a-col>
-                      <a-col :span="6">
+                      <a-col :span="12">
                         <a-form-item label="单次抓取上限 (Limit)">
                           <a-input-number
                             v-model:value="kingdeeQuery.limit"
@@ -1429,6 +1552,244 @@ const onPaginationToggle = () => {
   syncPagination()
 }
 
+// ===== 过滤条件：多字段 · 每字段多条件 =====
+type FilterValueType = 'TEXT' | 'NUMBER' | 'DATE' | 'RAW'
+
+interface FilterCondition {
+  rid: string
+  connector: 'AND' | 'OR'
+  field: string
+  op: string
+  valueType: FilterValueType
+  value: string
+  dateBase: 'today' | 'yesterday' | 'now'
+  dateOffset: number
+}
+
+const FILTER_OPS = [
+  '=',
+  '<>',
+  '>',
+  '>=',
+  '<',
+  '<=',
+  'LIKE',
+  'NOT LIKE',
+  'IN',
+  'NOT IN',
+  'IS NULL',
+  'IS NOT NULL'
+]
+
+const FILTER_VALUE_TYPES = [
+  { label: '文本', value: 'TEXT' },
+  { label: '数字', value: 'NUMBER' },
+  { label: '日期变量', value: 'DATE' },
+  { label: '原始表达式', value: 'RAW' }
+]
+
+let filterRidSeed = 0
+const defaultFilterCondition = (): FilterCondition => {
+  filterRidSeed += 1
+  return {
+    rid: `fc_${filterRidSeed}`,
+    connector: 'AND',
+    field: '',
+    op: '=',
+    valueType: 'TEXT',
+    value: '',
+    dateBase: 'today',
+    dateOffset: 0
+  }
+}
+
+const filterConditions = ref<FilterCondition[]>([])
+// table=结构化条件，text=直接编辑 FilterString
+const filterMode = ref<'table' | 'text'>('table')
+
+const needsFilterValue = (op: string) => op !== 'IS NULL' && op !== 'IS NOT NULL'
+
+// 日期变量写法：${today}、${today-60d}、${yesterday-1m}
+const buildDateVar = (row: FilterCondition) => {
+  const offset = row.dateOffset || 0
+  if (offset === 0) {
+    return `\${${row.dateBase}}`
+  }
+  const sign = offset > 0 ? '+' : '-'
+  return `\${${row.dateBase}${sign}${Math.abs(offset)}d}`
+}
+
+const quoteText = (text: string) => `'${text.replace(/'/g, "''")}'`
+
+const renderFilterValue = (row: FilterCondition) => {
+  const op = row.op.toUpperCase()
+  if (op === 'IN' || op === 'NOT IN') {
+    const items = row.value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (!items.length) return "('')"
+    const rendered = items.map((item) =>
+      row.valueType === 'NUMBER' ? item : quoteText(item)
+    )
+    return `(${rendered.join(', ')})`
+  }
+  switch (row.valueType) {
+    case 'NUMBER':
+      return row.value.trim() || '0'
+    case 'DATE':
+      return quoteText(buildDateVar(row))
+    case 'RAW':
+      return row.value.trim()
+    default:
+      return quoteText(row.value)
+  }
+}
+
+const buildFilterString = () => {
+  const usable = filterConditions.value.filter((row) => row.field.trim())
+  if (!usable.length) return ''
+  return usable
+    .map((row, index) => {
+      const base = `${row.field.trim()} ${row.op}`
+      const expr = needsFilterValue(row.op) ? `${base} ${renderFilterValue(row)}` : base
+      return index === 0 ? expr : `${row.connector} ${expr}`
+    })
+    .join(' ')
+}
+
+// 结构化条件 -> FilterString（并同步请求体与持久化配置）
+const applyFilterConditions = () => {
+  kingdeeQuery.value.filterString = buildFilterString()
+  formData.value.filterMeta = JSON.stringify({
+    mode: filterMode.value,
+    conditions: filterConditions.value
+  })
+  syncKingdeeQueryToBody()
+}
+
+const addFilterCondition = () => {
+  filterConditions.value.push(defaultFilterCondition())
+  applyFilterConditions()
+}
+
+const removeFilterCondition = (index: number) => {
+  filterConditions.value.splice(index, 1)
+  applyFilterConditions()
+}
+
+// 尽量把已有的 FilterString 解析回结构化条件；解析不了就返回 null
+const parseFilterString = (raw: string): FilterCondition[] | null => {
+  const text = (raw || '').trim()
+  if (!text) return []
+  const tokens = text.split(/\s+(AND|OR)\s+/i)
+  if (tokens.length % 2 === 0) return null
+
+  const rows: FilterCondition[] = []
+  for (let i = 0; i < tokens.length; i += 2) {
+    const expr = tokens[i].trim()
+    if (!expr) return null
+    const connector = i === 0 ? 'AND' : (tokens[i - 1].toUpperCase() as 'AND' | 'OR')
+    const match = expr.match(
+      /^([A-Za-z_][A-Za-z0-9_.]*)\s*(NOT\s+LIKE|NOT\s+IN|>=|<=|<>|!=|=|>|<|LIKE|IN|IS\s+NOT\s+NULL|IS\s+NULL)\s*(.*)$/i
+    )
+    if (!match) return null
+    const field = match[1]
+    const op = match[2].toUpperCase().replace(/\s+/g, ' ')
+    const rawValue = (match[3] || '').trim()
+
+    const row = defaultFilterCondition()
+    row.connector = connector
+    row.field = field
+    row.op = FILTER_OPS.includes(op) ? op : '='
+
+    if (op === 'IS NULL' || op === 'IS NOT NULL') {
+      rows.push(row)
+      continue
+    }
+    if (op === 'IN' || op === 'NOT IN') {
+      row.valueType = 'RAW'
+      row.value = rawValue
+      rows.push(row)
+      continue
+    }
+    if (/^'.*'$/.test(rawValue)) {
+      const inner = rawValue.slice(1, -1).replace(/''/g, "'")
+      const dateMatch = inner.match(/^\$\{(today|yesterday|now)([+-]\d+)?d?\}$/i)
+      if (dateMatch) {
+        row.valueType = 'DATE'
+        row.dateBase = dateMatch[1].toLowerCase() as 'today' | 'yesterday' | 'now'
+        row.dateOffset = dateMatch[2] ? Number(dateMatch[2]) : 0
+      } else {
+        row.valueType = 'TEXT'
+        row.value = inner
+      }
+    } else if (/^-?\d+(\.\d+)?$/.test(rawValue)) {
+      row.valueType = 'NUMBER'
+      row.value = rawValue
+    } else {
+      row.valueType = 'RAW'
+      row.value = rawValue
+    }
+    rows.push(row)
+  }
+  return rows
+}
+
+const loadFilter = (preserveMode = false) => {
+  if (!preserveMode) {
+    filterMode.value = 'table'
+  }
+  let conditions: FilterCondition[] | null = null
+  if (formData.value.filterMeta) {
+    try {
+      const parsed = JSON.parse(formData.value.filterMeta)
+      if (parsed?.mode === 'text') {
+        filterMode.value = 'text'
+      }
+      if (Array.isArray(parsed?.conditions)) {
+        conditions = parsed.conditions.map((item: any) => ({
+          ...defaultFilterCondition(),
+          ...item,
+          rid: `fc_${++filterRidSeed}`
+        }))
+      }
+    } catch (e) {
+      conditions = null
+    }
+  }
+  if (!conditions) {
+    // 老流程只有 FilterString，尽量解析回来
+    conditions = parseFilterString(kingdeeQuery.value.filterString) || []
+  }
+  filterConditions.value = conditions
+}
+
+const switchFilterMode = () => {
+  if (filterMode.value === 'table') {
+    // 从文本切回表格：先尝试解析用户手写的内容
+    const parsed = parseFilterString(kingdeeQuery.value.filterString)
+    if (parsed === null) {
+      message.warning('当前过滤条件无法解析为结构化条件，已保留原有条件，编辑表格会覆盖文本内容')
+    } else {
+      filterConditions.value = parsed
+      applyFilterConditions()
+    }
+  }
+  filterMode.value = filterMode.value === 'table' ? 'text' : 'table'
+  formData.value.filterMeta = JSON.stringify({
+    mode: filterMode.value,
+    conditions: filterConditions.value
+  })
+}
+
+// 字段名候选（来自已拉取的字段清单），用于过滤条件输入提示
+const filterFieldOptions = computed(() =>
+  fieldRows.value
+    .filter((row) => row.fieldKey.trim())
+    .map((row) => ({ value: row.fieldKey.trim() }))
+)
+
 // ===== 抽取字段清单（表格编辑 + Excel 导入导出） =====
 const fieldRows = ref<FieldRow[]>([])
 const textMode = ref(false)
@@ -1826,6 +2187,7 @@ const syncBodyToKingdeeQuery = () => {
     if (d.OrderString !== undefined) kingdeeQuery.value.orderString = d.OrderString
     if (d.Limit !== undefined) kingdeeQuery.value.limit = d.Limit
     rebuildFieldRows()
+    loadFilter(true)
   } catch (e) {}
 }
 
@@ -1967,6 +2329,7 @@ const loadKingdeeBillTemplate = (billType: string) => {
   }
   syncKingdeeQueryToBody()
   rebuildFieldRows()
+  loadFilter()
   message.success(`已载入 ${billType} 常用抽取字段与过滤条件`)
 }
 
@@ -2141,6 +2504,7 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
       fieldRows.value = fieldRowsFromMeta(record.fieldMeta, kingdeeQuery.value.fieldKeys)
     }
     loadPagination()
+    loadFilter()
   } else {
     isEdit.value = false
     currentId.value = ''
@@ -2154,6 +2518,7 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     syncKingdeeLoginBody()
     syncKingdeeQueryToBody()
     rebuildFieldRows()
+    loadFilter()
     // 新建流程时自动套用已保存凭证，省去每次手填
     await loadCredentialSilently()
   }
@@ -2172,6 +2537,7 @@ const handleReset = () => {
     syncKingdeeLoginBody()
     syncKingdeeQueryToBody()
     rebuildFieldRows()
+    loadFilter()
   }
 }
 
@@ -2598,5 +2964,53 @@ defineExpose({ open })
   margin-left: 8px;
   font-size: 12px;
   color: #8c8c8c;
+}
+
+.filt-panel {
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: -8px 0 16px;
+}
+
+.filt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.filt-where {
+  width: 78px;
+  flex: none;
+  padding-left: 4px;
+  font-size: 12px;
+  color: #8c8c8c;
+  font-family: Consolas, Monaco, monospace;
+}
+
+.filt-empty {
+  font-size: 12px;
+  color: #bfbfbf;
+  padding: 6px 2px;
+}
+
+.filt-preview {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed #e8e8e8;
+  font-size: 12px;
+  color: #8c8c8c;
+  word-break: break-all;
+  line-height: 1.9;
+}
+
+.filt-preview code {
+  color: #185fa5;
+  background: #e6f1fb;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: Consolas, Monaco, monospace;
 }
 </style>
