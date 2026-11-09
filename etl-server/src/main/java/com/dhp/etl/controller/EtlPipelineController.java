@@ -4,10 +4,12 @@ import com.dhp.common.base.BaseCrudController;
 import com.dhp.common.base.IBaseCrudService;
 import com.dhp.common.result.R;
 import com.dhp.etl.core.extractor.KingdeeMetadataClient;
+import com.dhp.etl.core.extractor.RequestVarResolver;
 import com.dhp.etl.core.extractor.WebApiExtractor;
 import com.dhp.etl.core.guard.SqlSafetyGuard;
 import com.dhp.etl.dto.KingdeeFormFieldQueryDTO;
 import com.dhp.etl.dto.SqlValidateDTO;
+import com.dhp.etl.dto.VarEvalDTO;
 import com.dhp.etl.entity.EtlPipeline;
 import com.dhp.etl.service.EtlPipelineService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -31,6 +33,7 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
     private final SqlSafetyGuard sqlSafetyGuard;
     private final WebApiExtractor webApiExtractor;
     private final KingdeeMetadataClient kingdeeMetadataClient;
+    private final RequestVarResolver requestVarResolver;
 
     @Override
     protected IBaseCrudService<EtlPipeline> getService() {
@@ -122,5 +125,11 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
         res.put("records", records.stream().limit(50).toList());
         res.put("log", logBuffer.toString());
         return R.ok(res);
+    }
+
+    @Operation(summary = "变量 SQL 试算（在目标数据源执行，不落库）")
+    @PostMapping("/webapi/eval-var")
+    public R<Map<String, Object>> evalVariable(@RequestBody @Valid VarEvalDTO dto) {
+        return R.ok(requestVarResolver.evaluate(dto.getTargetDsId(), dto.getName(), dto.getSql()));
     }
 }

@@ -204,25 +204,78 @@ public class RequestVarResolver {
         return result;
     }
 
+    /**
+     * 单变量试算：在目标数据源上执行一次取值表达式，返回结果供界面预览。
+     *
+     * <p>只校验 SQL，不校验变量名——变量名可能还在编辑中，不该阻断试算。
+     */
+    public Map<String, Object> evaluate(Long targetDsId, String name, String sql) {
+        VarDef def = new VarDef(StrUtil.isBlank(name) ? "value" : name, sql);
+        validateSql(def.getName(), def.getSql());
+        if (targetDsId == null) {
+            throw new BizException(ErrorCode.PARAM_ERROR, "请先选择目标数据源");
+        }
+
+        DataSource dataSource = datasourceService.getDataSource(targetDsId);
+        long begin = System.currentTimeMillis();
+        try (Connection conn = dataSource.getConnection();
+             Statement statement = conn.createStatement()) {
+            statement.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+
+            String expression = DateVarResolver.resolve(def.getSql());
+            try (ResultSet rs = statement.executeQuery("SELECT (" + expression + ") AS v")) {
+                if (!rs.next()) {
+                    throw new BizException(ErrorCode.PARAM_ERROR, "表达式未返回任何结果");
+                }
+                Object value = rs.getObject(1);
+                if (value == null) {
+                    throw new BizException(ErrorCode.PARAM_ERROR, "表达式计算结果为空");
+                }
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("name", def.getName());
+                result.put("value", String.valueOf(value));
+                // 用 int 而非 long：项目把 Long 统一序列化成字符串（防前端精度丢失），
+                // 耗时字段需要保持数字类型
+                result.put("elapsedMs", (int) (System.currentTimeMillis() - begin));
+                return result;
+            }
+        } catch (BizException e) {
+            throw e;
+        } catch (java.sql.SQLSyntaxErrorException e) {
+            log.warn("变量试算语法错误: {}", e.getMessage());
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    "SQL 语法错误，请检查表达式是否完整（系统会自动包装为 SELECT (表达式)）：" + e.getMessage());
+        } catch (Exception e) {
+            log.warn("变量试算失败: {}", e.getMessage());
+            throw new BizException(ErrorCode.ETL_EXECUTE_ERROR, "试算失败: " + e.getMessage());
+        }
+    }
+
     static void validateDefinition(VarDef def) {
         if (!NAME_PATTERN.matcher(def.getName()).matches()) {
             throw new BizException(ErrorCode.PARAM_ERROR,
                     "变量名不合法：" + def.getName() + "（只允许字母、数字、下划线，且不以数字开头）");
         }
-        String sql = def.getSql();
+        validateSql(def.getName(), def.getSql());
+    }
+
+    static void validateSql(String name, String sql) {
+        if (StrUtil.isBlank(sql)) {
+            throw new BizException(ErrorCode.PARAM_ERROR, "变量 " + name + " 的 SQL 表达式不能为空");
+        }
         if (sql.length() > MAX_SQL_LENGTH) {
             throw new BizException(ErrorCode.ETL_SQL_SAFETY_ERROR,
-                    "变量 " + def.getName() + " 的 SQL 过长（上限 " + MAX_SQL_LENGTH + " 字符）");
+                    "变量 " + name + " 的 SQL 过长（上限 " + MAX_SQL_LENGTH + " 字符）");
         }
         if (sql.contains(";")) {
             throw new BizException(ErrorCode.ETL_SQL_SAFETY_ERROR,
-                    "变量 " + def.getName() + " 只允许单条取值表达式，不支持分号分隔多语句");
+                    "变量 " + name + " 只允许单条取值表达式，不支持分号分隔多语句");
         }
         String upper = sql.toUpperCase();
         for (String fragment : FORBIDDEN_SQL_FRAGMENTS) {
             if (upper.contains(fragment)) {
                 throw new BizException(ErrorCode.ETL_SQL_SAFETY_ERROR,
-                        "变量 " + def.getName() + " 的 SQL 包含禁止的内容: " + fragment);
+                        "变量 " + name + " 的 SQL 包含禁止的内容: " + fragment);
             }
         }
     }

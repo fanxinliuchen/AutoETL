@@ -91,3 +91,19 @@ export function saveKingdeeCredential(data: {
 export function getKingdeeCredentialDefault(): Promise<KingdeeCredentialMasked | null> {
   return request.get('/etl/kingdee-credential/default')
 }
+
+export interface VarEvalResult {
+  name: string
+  value: string
+  elapsedMs: number
+}
+
+/** 变量 SQL 试算：在目标数据源上执行一次取值表达式，不落库 */
+export function evaluateVariable(data: {
+  // 雪花 ID 超出 JS 安全整数范围，必须按字符串传，避免精度丢失
+  targetDsId: number | string
+  name?: string
+  sql: string
+}): Promise<VarEvalResult> {
+  return request.post('/etl/pipeline/webapi/eval-var', data)
+}

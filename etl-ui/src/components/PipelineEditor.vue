@@ -642,28 +642,50 @@
                             <plus-outlined /> 添加变量
                           </a-button>
                         </div>
-                        <div v-for="(v, vi) in filterVariables" :key="v.rid" class="var-row">
-                          <a-input
-                            v-model:value="v.name"
-                            size="small"
-                            class="fk-input-mono"
-                            placeholder="变量名"
-                            style="width: 148px; flex: none"
-                            @change="applyFilterConditions"
-                          />
-                          <span class="var-eq">=</span>
-                          <a-textarea
-                            v-model:value="v.sql"
-                            size="small"
-                            class="fk-input-mono var-sql"
-                            :auto-size="{ minRows: 1, maxRows: 3 }"
-                            placeholder="SELECT 表达式，如 DATE_SUB(CURDATE(), INTERVAL ((WEEKDAY(CURDATE()) + 3) % 7 + 7) DAY)"
-                            style="flex: 1; min-width: 260px"
-                            @change="applyFilterConditions"
-                          />
-                          <a-button size="small" type="link" danger @click="removeVariable(vi)">
-                            删除
-                          </a-button>
+                        <div v-for="(v, vi) in filterVariables" :key="v.rid" class="var-item">
+                          <div class="var-row">
+                            <a-input
+                              v-model:value="v.name"
+                              size="small"
+                              class="fk-input-mono"
+                              placeholder="变量名"
+                              style="width: 148px; flex: none"
+                              @change="onVariableEdited(v)"
+                            />
+                            <span class="var-eq">=</span>
+                            <a-textarea
+                              v-model:value="v.sql"
+                              size="small"
+                              class="fk-input-mono var-sql"
+                              :auto-size="{ minRows: 1, maxRows: 3 }"
+                              placeholder="SELECT 表达式，如 DATE_SUB(CURDATE(), INTERVAL ((WEEKDAY(CURDATE()) + 3) % 7 + 7) DAY)"
+                              style="flex: 1; min-width: 260px"
+                              @change="onVariableEdited(v)"
+                            />
+                            <a-tooltip title="在目标数据源上执行一次，立即看到取值">
+                              <a-button
+                                size="small"
+                                :loading="v.testing"
+                                @click="testVariable(v)"
+                              >
+                                试算
+                              </a-button>
+                            </a-tooltip>
+                            <a-button size="small" type="link" danger @click="removeVariable(vi)">
+                              删除
+                            </a-button>
+                          </div>
+                          <div
+                            v-if="v.result"
+                            class="var-result"
+                            :class="{ 'var-result-err': v.resultError }"
+                          >
+                            <template v-if="v.resultError">试算失败：{{ v.result }}</template>
+                            <template v-else>
+                              {{ v.name || '结果' }} = <b>{{ v.result }}</b>
+                              <span class="var-result-time">（{{ v.elapsedMs }} ms）</span>
+                            </template>
+                          </div>
                         </div>
                         <div v-if="!filterVariables.length" class="var-empty">
                           未定义变量。需要「上个会计周」这类动态日期时，在此配置 SQL 即可，条件值选「变量」引用。
@@ -1460,6 +1482,7 @@ import {
   queryKingdeeFormFields,
   saveKingdeeCredential,
   getKingdeeCredentialDefault,
+  evaluateVariable,
   type KingdeeFieldMeta,
   type KingdeeCredentialMasked
 } from '../api/pipeline'
@@ -1597,6 +1620,11 @@ interface FilterVariable {
   rid: string
   name: string
   sql: string
+  // 以下为试算用的界面状态，不写入 filter_meta
+  testing?: boolean
+  result?: string
+  resultError?: boolean
+  elapsedMs?: number
 }
 
 const FILTER_OPS = [
@@ -1722,6 +1750,44 @@ const addVariable = () => {
 const removeVariable = (index: number) => {
   filterVariables.value.splice(index, 1)
   applyFilterConditions()
+}
+
+// 编辑变量后清掉上一次的试算结果，避免看着旧值误判
+const onVariableEdited = (v: FilterVariable) => {
+  v.result = undefined
+  v.resultError = false
+  v.elapsedMs = undefined
+  applyFilterConditions()
+}
+
+// 变量 SQL 试算：在目标数据源上执行一次，立即返回取值
+const testVariable = async (v: FilterVariable) => {
+  if (!v.sql.trim()) {
+    message.warning('请先填写 SQL 表达式')
+    return
+  }
+  if (!formData.value.targetDsId) {
+    message.warning('请先选择目标数据源：变量 SQL 在目标库上执行')
+    return
+  }
+  v.testing = true
+  v.result = undefined
+  v.resultError = false
+  try {
+    const res = await evaluateVariable({
+      targetDsId: formData.value.targetDsId,
+      name: v.name.trim() || undefined,
+      sql: v.sql.trim()
+    })
+    v.result = res.value
+    v.elapsedMs = res.elapsedMs
+    v.resultError = false
+  } catch (e: any) {
+    v.result = e?.message || '执行失败'
+    v.resultError = true
+  } finally {
+    v.testing = false
+  }
 }
 
 const addFilterCondition = () => {
@@ -3081,11 +3147,35 @@ defineExpose({ open })
   font-family: Consolas, Monaco, monospace;
 }
 
+.var-item {
+  margin-bottom: 6px;
+}
+
 .var-row {
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  margin-bottom: 6px;
+}
+
+.var-result {
+  margin: 2px 0 0 168px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #237804;
+  word-break: break-all;
+}
+
+.var-result b {
+  font-family: Consolas, Monaco, monospace;
+  font-weight: 600;
+}
+
+.var-result-err {
+  color: #cf1322;
+}
+
+.var-result-time {
+  color: #bfbfbf;
 }
 
 .var-eq {
