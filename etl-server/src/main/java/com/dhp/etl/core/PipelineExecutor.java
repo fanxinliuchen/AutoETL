@@ -17,6 +17,7 @@ import com.dhp.etl.entity.EtlTaskInstance;
 import com.dhp.etl.enums.SourceTypeEnum;
 import com.dhp.etl.enums.TaskStatusEnum;
 import com.dhp.etl.enums.TriggerTypeEnum;
+import com.dhp.etl.enums.WriteModeEnum;
 import com.dhp.etl.service.EtlDatasourceService;
 import com.dhp.etl.service.EtlPipelineService;
 import com.dhp.etl.service.EtlTaskInstanceService;
@@ -92,6 +93,12 @@ public class PipelineExecutor {
         if (pipeline.getTargetDsId() == null || StrUtil.isBlank(pipeline.getTargetTable())) {
             log.warn("[ETL] 流程 {} 属于草稿/未完整配置状态，无法执行", pipeline.getPipelineCode());
             throw new BizException(ErrorCode.PARAM_ERROR, "流程配置尚未完善（缺少目标数仓连接或目标表），请先编辑完善后再运行");
+        }
+        // 增量同步依赖系统生成「软删除 + UPSERT」脚本，与手写脚本互斥，避免两套逻辑叠加
+        if (pipeline.getWriteMode() == WriteModeEnum.SYNC && StrUtil.isNotBlank(pipeline.getTransformSql())) {
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    "写入模式为「增量同步」时不能同时填写转换 SQL：删除判定与合并写入由系统生成。"
+                            + "如需自定义清洗逻辑，请改用「主键更新插入(UPSERT)」并自行处理删除");
         }
 
         // 并发防重保护

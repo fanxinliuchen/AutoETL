@@ -88,7 +88,8 @@ CREATE TABLE t_etl_pipeline (
     transform_sql    MEDIUMTEXT   NULL     COMMENT 'SQL处理转换脚本(多段分号分隔)',
     target_ds_id     BIGINT       NULL     COMMENT '目标数仓数据源ID',
     target_table     VARCHAR(64)  NULL     COMMENT '目标表名',
-    write_mode       VARCHAR(32)  NOT NULL DEFAULT 'APPEND' COMMENT '写入模式: APPEND/OVERWRITE/UPSERT',
+    write_mode       VARCHAR(32)  NOT NULL DEFAULT 'APPEND' COMMENT '写入模式: APPEND/OVERWRITE/UPSERT/SYNC',
+    sync_config      TEXT         NULL     COMMENT '增量同步配置JSON(范围字段/窗口天数/软删除列)',
     upsert_keys      VARCHAR(255) NULL     COMMENT 'UPSERT模式主键(逗号分隔)',
     field_meta       TEXT         NULL     COMMENT '抽取字段元数据JSON(中文名/类型/启用)',
 

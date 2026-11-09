@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS t_etl_pipeline (
     target_ds_id     BIGINT       NULL,
     target_table     VARCHAR(64)  NULL,
     write_mode       VARCHAR(32)  NOT NULL DEFAULT 'APPEND',
+    sync_config      TEXT         NULL,
     upsert_keys      VARCHAR(255) NULL,
     field_meta       TEXT         NULL,
     cron_expr        VARCHAR(64)  NULL,

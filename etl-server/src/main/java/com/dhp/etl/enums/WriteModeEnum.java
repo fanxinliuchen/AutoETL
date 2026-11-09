@@ -13,7 +13,8 @@ import lombok.Getter;
 public enum WriteModeEnum {
     APPEND("APPEND", "追加写入"),
     OVERWRITE("OVERWRITE", "清空覆盖"),
-    UPSERT("UPSERT", "主键更新插入");
+    UPSERT("UPSERT", "主键更新插入"),
+    SYNC("SYNC", "增量同步(软删除)");
 
     @EnumValue
     @JsonValue

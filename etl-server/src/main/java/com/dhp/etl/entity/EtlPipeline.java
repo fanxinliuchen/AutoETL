@@ -76,11 +76,14 @@ public class EtlPipeline extends BaseTenantEntity {
     /** 目标表名 */
     private String targetTable;
 
-    /** 写入模式: APPEND / OVERWRITE / UPSERT */
+    /** 写入模式: APPEND / OVERWRITE / UPSERT / SYNC */
     private WriteModeEnum writeMode;
 
-    /** UPSERT 模式业务主键(逗号分隔) */
+    /** UPSERT 模式业务主键(逗号分隔)，SYNC 模式用作比对主键 */
     private String upsertKeys;
+
+    /** 增量同步配置 JSON（范围字段 / 窗口天数 / 软删除列 / 删除比例上限） */
+    private String syncConfig;
 
     /** 抽取字段清单元数据 JSON（中文名/类型/启用；字段名与顺序以 apiBody.FieldKeys 为准） */
     private String fieldMeta;

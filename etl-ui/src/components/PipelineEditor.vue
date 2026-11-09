@@ -1318,15 +1318,95 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                         <a-select-option value="APPEND">APPEND (直接追加插入)</a-select-option>
                         <a-select-option value="OVERWRITE">OVERWRITE (清空全量覆盖)</a-select-option>
                         <a-select-option value="UPSERT">UPSERT (依据主键更新合并)</a-select-option>
+                        <a-select-option value="SYNC">SYNC (增量同步：合并 + 软删除)</a-select-option>
                       </a-select>
                     </a-form-item>
                   </a-col>
-                  <a-col :span="12" v-if="formData.writeMode === 'UPSERT'">
-                    <a-form-item label="唯一主键列 (逗号分隔)">
-                      <a-input v-model:value="formData.upsertKeys" placeholder="例如：id 或 material_code" />
+                  <a-col :span="12" v-if="formData.writeMode === 'UPSERT' || formData.writeMode === 'SYNC'">
+                    <a-form-item
+                      :label="
+                        formData.writeMode === 'SYNC'
+                          ? '比对主键列 (逗号分隔，如 FEntity_FENTRYID)'
+                          : '唯一主键列 (逗号分隔)'
+                      "
+                    >
+                      <a-input
+                        v-model:value="formData.upsertKeys"
+                        :placeholder="
+                          formData.writeMode === 'SYNC'
+                            ? '金蝶分录内码，如 FEntity_FENTRYID'
+                            : '例如：id 或 material_code'
+                        "
+                      />
                     </a-form-item>
                   </a-col>
                 </a-row>
+
+                <!-- 增量同步配置 -->
+                <div v-if="formData.writeMode === 'SYNC'" class="sync-box">
+                  <div class="sync-title">增量同步配置</div>
+                  <a-row :gutter="16">
+                    <a-col :span="8">
+                      <a-form-item label="删除判定范围字段">
+                        <a-input
+                          v-model:value="syncConfig.scopeField"
+                          placeholder="如 FAuditDate（审核时间）"
+                          @change="syncSyncConfig"
+                        />
+                      </a-form-item>
+                    </a-col>
+                    <a-col :span="8">
+                      <a-form-item label="窗口天数（近 N 天）">
+                        <a-input-number
+                          v-model:value="syncConfig.scopeDays"
+                          :min="1"
+                          :max="3650"
+                          style="width: 100%"
+                          @change="syncSyncConfig"
+                        />
+                      </a-form-item>
+                    </a-col>
+                    <a-col :span="8">
+                      <a-form-item label="删除比例上限（超过则中止）">
+                        <a-input-number
+                          v-model:value="syncConfig.maxDeleteRatio"
+                          :min="0.05"
+                          :max="1"
+                          :step="0.05"
+                          :precision="2"
+                          style="width: 100%"
+                          @change="syncSyncConfig"
+                        />
+                      </a-form-item>
+                    </a-col>
+                  </a-row>
+                  <a-row :gutter="16">
+                    <a-col :span="8">
+                      <a-form-item label="软删除标记列">
+                        <a-input
+                          v-model:value="syncConfig.softDeleteColumn"
+                          placeholder="is_deleted"
+                          @change="syncSyncConfig"
+                        />
+                      </a-form-item>
+                    </a-col>
+                    <a-col :span="8">
+                      <a-form-item label="软删除时间列（留空则不打时间）">
+                        <a-input
+                          v-model:value="syncConfig.softDeleteTimeColumn"
+                          placeholder="delete_time"
+                          @change="syncSyncConfig"
+                        />
+                      </a-form-item>
+                    </a-col>
+                  </a-row>
+                  <div class="fk-hint">
+                    执行时：在「范围字段 ≥ 今天 − N 天」的窗口内，目标表有、本次抽取没有的行 → 标记删除；
+                    本次数据按主键合并写入，并把删除标记复位。第 3 步的转换 SQL 需<b>留空</b>，由系统生成脚本。
+                    目标表需先具备软删除列（如 <code>is_deleted TINYINT DEFAULT 0</code>、
+                    <code>delete_time DATETIME NULL</code>）。
+                  </div>
+                </div>
               </a-card>
 
               <!-- 底部导航条 -->
@@ -1532,6 +1612,7 @@ const initialFormData = (): Partial<EtlPipeline> => ({
   apiAuthType: 'KINGDEE_K3',
   apiMethod: 'POST',
   writeMode: 'APPEND',
+  syncConfig: '',
   timeoutSeconds: 1800,
   maxRetryCount: 0,
   scheduleStatus: 0,
@@ -1674,6 +1755,34 @@ const defaultFilterVariable = (): FilterVariable => {
 
 const filterConditions = ref<FilterCondition[]>([])
 const filterVariables = ref<FilterVariable[]>([])
+
+// ===== 增量同步（SYNC）配置：随流程存于 sync_config =====
+const defaultSyncConfig = () => ({
+  scopeField: '',
+  scopeDays: 90,
+  softDeleteColumn: 'is_deleted',
+  softDeleteTimeColumn: 'delete_time',
+  maxDeleteRatio: 0.5
+})
+
+const syncConfig = ref(defaultSyncConfig())
+
+const syncSyncConfig = () => {
+  formData.value.syncConfig = JSON.stringify(syncConfig.value)
+}
+
+const loadSyncConfig = () => {
+  syncConfig.value = defaultSyncConfig()
+  if (!formData.value.syncConfig) {
+    return
+  }
+  try {
+    const parsed = JSON.parse(formData.value.syncConfig)
+    syncConfig.value = { ...syncConfig.value, ...parsed }
+  } catch (e) {
+    syncConfig.value = defaultSyncConfig()
+  }
+}
 // table=结构化条件，text=直接编辑 FilterString
 const filterMode = ref<'table' | 'text'>('table')
 
@@ -2330,6 +2439,7 @@ const syncBodyToKingdeeQuery = () => {
     if (d.Limit !== undefined) kingdeeQuery.value.limit = d.Limit
     rebuildFieldRows()
     loadFilter(true)
+    loadSyncConfig()
   } catch (e) {}
 }
 
@@ -2472,6 +2582,7 @@ const loadKingdeeBillTemplate = (billType: string) => {
   syncKingdeeQueryToBody()
   rebuildFieldRows()
   loadFilter()
+  loadSyncConfig()
   message.success(`已载入 ${billType} 常用抽取字段与过滤条件`)
 }
 
@@ -2647,6 +2758,7 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     }
     loadPagination()
     loadFilter()
+    loadSyncConfig()
   } else {
     isEdit.value = false
     currentId.value = ''
@@ -2661,6 +2773,7 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     syncKingdeeQueryToBody()
     rebuildFieldRows()
     loadFilter()
+    loadSyncConfig()
     // 新建流程时自动套用已保存凭证，省去每次手填
     await loadCredentialSilently()
   }
@@ -2680,6 +2793,7 @@ const handleReset = () => {
     syncKingdeeQueryToBody()
     rebuildFieldRows()
     loadFilter()
+    loadSyncConfig()
   }
 }
 
@@ -3199,6 +3313,21 @@ defineExpose({ open })
   padding: 2px 2px 6px;
   font-size: 12px;
   color: #bfbfbf;
+}
+
+.sync-box {
+  background: #fff;
+  border: 1px dashed #cfe3f7;
+  border-radius: 6px;
+  padding: 10px 12px 2px;
+  margin-top: 4px;
+}
+
+.sync-title {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #185fa5;
 }
 
 .filt-row {

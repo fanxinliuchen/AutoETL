@@ -79,8 +79,10 @@ export interface EtlPipeline {
   transformSql: string
   targetDsId?: string
   targetTable: string
-  writeMode: 'APPEND' | 'OVERWRITE' | 'UPSERT'
+  writeMode: 'APPEND' | 'OVERWRITE' | 'UPSERT' | 'SYNC'
   upsertKeys?: string
+  /** 增量同步配置 JSON（范围字段/窗口天数/软删除列/删除比例上限） */
+  syncConfig?: string
   fieldMeta?: string
   cronExpr?: string
   scheduleStatus?: number
