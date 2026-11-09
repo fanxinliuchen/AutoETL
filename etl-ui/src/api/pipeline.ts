@@ -107,3 +107,47 @@ export function evaluateVariable(data: {
 }): Promise<VarEvalResult> {
   return request.post('/etl/pipeline/webapi/eval-var', data)
 }
+
+// ===== 目标表结构 =====
+
+export interface TargetTableColumn {
+  name: string
+  columnType: string
+  nullable: boolean
+  defaultValue?: string
+  comment?: string
+  primaryKey: boolean
+  autoIncrement: boolean
+}
+
+export interface SchemaApplyResult {
+  table: string
+  created: boolean
+  statements: number
+  executedSql: string[]
+}
+
+/** 目标库中的表清单 */
+export function listTargetTables(datasourceId: number | string): Promise<string[]> {
+  return request.post('/etl/datasource/tables', { datasourceId })
+}
+
+/** 目标表结构；表不存在返回空数组 */
+export function describeTargetTable(
+  datasourceId: number | string,
+  table: string
+): Promise<TargetTableColumn[]> {
+  return request.post('/etl/datasource/table-columns', { datasourceId, table })
+}
+
+/** 按映射结果变更目标表结构 */
+export function applyTargetSchema(data: {
+  datasourceId: number | string
+  table: string
+  addColumns: { name: string; type: string; comment?: string }[]
+  dropColumns: string[]
+  primaryKeys: string[]
+  dropPrimaryKey: boolean
+}): Promise<SchemaApplyResult> {
+  return request.post('/etl/datasource/apply-schema', data)
+}

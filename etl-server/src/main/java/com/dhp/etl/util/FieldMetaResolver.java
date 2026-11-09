@@ -22,6 +22,7 @@ public final class FieldMetaResolver {
 
     private static final Pattern VARCHAR_PATTERN = Pattern.compile("^VARCHAR\\((\\d{1,4})\\)$");
     private static final Pattern DECIMAL_PATTERN = Pattern.compile("^DECIMAL\\((\\d{1,2}),(\\d{1,2})\\)$");
+    private static final Pattern CHAR_PATTERN = Pattern.compile("^CHAR\\((\\d{1,4})\\)$");
 
     private FieldMetaResolver() {
     }
@@ -73,8 +74,13 @@ public final class FieldMetaResolver {
             case "TEXT":
             case "BIGINT":
             case "INT":
+            case "TINYINT":
+            case "SMALLINT":
+            case "DOUBLE":
+            case "BOOLEAN":
             case "DATE":
             case "DATETIME":
+            case "TIMESTAMP":
                 return type;
             default:
                 break;
@@ -83,6 +89,11 @@ public final class FieldMetaResolver {
         if (varchar.matches()) {
             int length = Integer.parseInt(varchar.group(1));
             return (length >= 1 && length <= 2000) ? "VARCHAR(" + length + ")" : "TEXT";
+        }
+        Matcher charType = CHAR_PATTERN.matcher(type);
+        if (charType.matches()) {
+            int length = Integer.parseInt(charType.group(1));
+            return (length >= 1 && length <= 255) ? "CHAR(" + length + ")" : "VARCHAR(255)";
         }
         Matcher decimal = DECIMAL_PATTERN.matcher(type);
         if (decimal.matches()) {

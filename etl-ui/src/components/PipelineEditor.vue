@@ -1297,7 +1297,12 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                 <a-row :gutter="24">
                   <a-col :span="12">
                     <a-form-item label="目标 MySQL 数仓连接" name="targetDsId" required>
-                      <a-select v-model:value="formData.targetDsId" placeholder="选择目标数仓连接" allow-clear>
+                      <a-select
+                        v-model:value="formData.targetDsId"
+                        placeholder="选择目标数仓连接"
+                        allow-clear
+                        @change="onTargetDsChange"
+                      >
                         <a-select-option v-for="ds in datasourceList" :key="ds.id" :value="ds.id">
                           {{ ds.dsName }} ({{ ds.host ? `${ds.host}:${ds.port || 3306}/${ds.databaseName || ''}` : ds.jdbcUrl }})
                         </a-select-option>
@@ -1306,7 +1311,14 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                   </a-col>
                   <a-col :span="12">
                     <a-form-item label="目标数据表名" name="targetTable" required>
-                      <a-input v-model:value="formData.targetTable" placeholder="例如：dwd_erp_material_info" />
+                      <a-auto-complete
+                        v-model:value="formData.targetTable"
+                        :options="targetTableOptions"
+                        placeholder="选择已有表，或直接输入新表名"
+                        :filter-option="filterTableOption"
+                        @select="onTargetTableChange"
+                        @blur="onTargetTableChange"
+                      />
                     </a-form-item>
                   </a-col>
                 </a-row>
@@ -1407,6 +1419,61 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                     <code>delete_time DATETIME NULL</code>）。
                   </div>
                 </div>
+
+                <!-- 字段映射：左=抽取字段，右=目标表字段 -->
+                <div class="map-box">
+                  <div class="map-head">
+                    <span class="map-title">字段映射</span>
+                    <span class="map-sub">{{ mappingSummary }}</span>
+                    <a-space :size="8">
+                      <a-button size="small" :loading="mappingLoading" @click="refreshMapping">
+                        重新获取
+                      </a-button>
+                      <a-button
+                        size="small"
+                        type="primary"
+                        ghost
+                        :disabled="!formData.targetDsId || !formData.targetTable"
+                        @click="openSchemaModal"
+                      >
+                        更新（新建）目标表
+                      </a-button>
+                    </a-space>
+                  </div>
+
+                  <div v-if="!formData.targetDsId" class="map-empty">
+                    请先选择目标数据源；选择后自动读取表清单与表结构
+                  </div>
+                  <div v-else-if="!formData.targetTable" class="map-empty">
+                    选择或输入目标表名后，这里会显示左右字段对照
+                  </div>
+                  <div v-else-if="!mappingRows.length" class="map-empty">
+                    暂无字段。左侧来自第 2 步抽取字段清单；若尚未配置，请先回到第 2 步维护字段
+                  </div>
+                  <div v-else class="map-table">
+                    <div class="map-row map-row-head">
+                      <span>抽取字段</span>
+                      <span>来源类型</span>
+                      <span class="map-arrow"></span>
+                      <span>目标表字段</span>
+                      <span>目标类型</span>
+                      <span>状态</span>
+                    </div>
+                    <div v-for="row in mappingRows" :key="row.key" class="map-row">
+                      <span class="map-name">{{ row.sourceName || '—' }}</span>
+                      <span class="map-type">{{ row.sourceType || '' }}</span>
+                      <span class="map-arrow">
+                        {{ row.status === 'MISSING_IN_TARGET' ? '→' : row.status === 'MISSING_IN_SOURCE' ? '←' : '↔' }}
+                      </span>
+                      <span class="map-name">{{ row.targetName || '—' }}</span>
+                      <span class="map-type">{{ row.targetType || '' }}</span>
+                      <span :class="['map-status', row.statusClass]">{{ row.statusText }}</span>
+                    </div>
+                  </div>
+                  <div v-if="formData.writeMode === 'SYNC' && mappingRows.length" class="fk-hint">
+                    增量同步模式已自动把软删除列计入左侧字段，目标表缺列时可通过「更新（新建）目标表」补齐。
+                  </div>
+                </div>
               </a-card>
 
               <!-- 底部导航条 -->
@@ -1505,6 +1572,65 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
       </a-form>
     </div>
 
+    <!-- 目标表结构变更确认 -->
+    <a-modal
+      v-model:open="schemaModal.visible"
+      :title="`更新目标表：${formData.targetTable || ''}`"
+      width="820px"
+      :confirm-loading="schemaModal.submitting"
+      ok-text="确认更新"
+      cancel-text="取消"
+      @ok="submitSchema"
+    >
+      <a-alert
+        v-if="!schemaModal.tableExists"
+        type="warning"
+        show-icon
+        message="目标表不存在，确认后将按左侧字段新建"
+        description="主键可留空；若写入模式为 SYNC，建议把比对主键设为 PRIMARY KEY，否则合并写入会重复。"
+        style="margin-bottom: 12px"
+      />
+      <a-alert
+        v-else
+        type="info"
+        show-icon
+        :message="`拟执行：新增 ${schemaModal.addColumns.length} 列，删除 ${schemaModal.dropColumns.length} 列`"
+        description="删除列不可恢复，请确认下游没有依赖。变更会立即在目标库执行。"
+        style="margin-bottom: 12px"
+      />
+
+      <div class="schema-section">
+        <div class="schema-title">新增字段（左侧有、目标表无）</div>
+        <div v-if="!schemaModal.addColumns.length" class="schema-empty">无</div>
+        <div v-for="(col, i) in schemaModal.addColumns" :key="col.name" class="schema-row">
+          <span class="schema-name">{{ col.name }}</span>
+          <a-input v-model:value="col.type" size="small" style="width: 220px" />
+          <a-button size="small" type="link" danger @click="schemaModal.addColumns.splice(i, 1)">
+            移除
+          </a-button>
+        </div>
+      </div>
+
+      <div class="schema-section">
+        <div class="schema-title">删除字段（目标表有、左侧无）</div>
+        <div v-if="!schemaModal.dropCandidates.length" class="schema-empty">无</div>
+        <a-checkbox-group v-else v-model:value="schemaModal.dropColumns">
+          <a-checkbox v-for="c in schemaModal.dropCandidates" :key="c" :value="c">{{ c }}</a-checkbox>
+        </a-checkbox-group>
+      </div>
+
+      <div class="schema-section">
+        <div class="schema-title">主键（可多选）</div>
+        <a-checkbox-group v-model:value="schemaModal.primaryKeys">
+          <a-checkbox v-for="f in schemaModal.keyCandidates" :key="f" :value="f">{{ f }}</a-checkbox>
+        </a-checkbox-group>
+        <div class="fk-hint">
+          当前主键：{{ schemaModal.currentKeys.length ? schemaModal.currentKeys.join(', ') : '无' }}；
+          变更时若与所选不一致，会先删除旧主键再添加新主键
+        </div>
+      </div>
+    </a-modal>
+
     <!-- 实时数据抽取预览弹窗 -->
     <a-modal
       v-model:open="previewModalVisible"
@@ -1568,6 +1694,10 @@ import {
   saveKingdeeCredential,
   getKingdeeCredentialDefault,
   evaluateVariable,
+  listTargetTables,
+  describeTargetTable,
+  applyTargetSchema,
+  type TargetTableColumn,
   type KingdeeFieldMeta,
   type KingdeeCredentialMasked
 } from '../api/pipeline'
@@ -1781,6 +1911,230 @@ const loadSyncConfig = () => {
     syncConfig.value = { ...syncConfig.value, ...parsed }
   } catch (e) {
     syncConfig.value = defaultSyncConfig()
+  }
+}
+
+// ===== 目标表字段映射 =====
+type MappingStatus = 'MATCH' | 'TYPE_DIFF' | 'MISSING_IN_TARGET' | 'MISSING_IN_SOURCE'
+
+interface MappingRow {
+  key: string
+  sourceName?: string
+  sourceType?: string
+  targetName?: string
+  targetType?: string
+  status: MappingStatus
+  statusText: string
+  statusClass: string
+}
+
+const targetTableOptions = ref<{ value: string }[]>([])
+const targetColumns = ref<TargetTableColumn[]>([])
+const mappingLoading = ref(false)
+let lastMappingTable = ''
+
+const parseKeysLower = (keys?: string) =>
+  (keys || '')
+    .split(',')
+    .map((k) => k.trim().toLowerCase())
+    .filter(Boolean)
+
+// 左侧：第 2 步抽取字段；增量同步模式自动补上软删除列
+const sourceFields = computed(() => {
+  const list = fieldRows.value
+    .filter((r) => r.fieldKey.trim() && r.enabled)
+    .map((r) => ({ name: r.fieldKey.trim(), type: r.type || 'TEXT' }))
+  if (formData.value.writeMode === 'SYNC') {
+    const sd = (syncConfig.value.softDeleteColumn || 'is_deleted').trim()
+    const sdt = (syncConfig.value.softDeleteTimeColumn || '').trim()
+    if (sd && !list.some((i) => i.name.toLowerCase() === sd.toLowerCase())) {
+      list.push({ name: sd, type: 'TINYINT' })
+    }
+    if (sdt && !list.some((i) => i.name.toLowerCase() === sdt.toLowerCase())) {
+      list.push({ name: sdt, type: 'DATETIME' })
+    }
+  }
+  return list
+})
+
+const sourceFieldNames = computed(() => sourceFields.value.map((f) => f.name))
+
+const normalizeType = (type: string) => (type || '').replace(/\s+/g, '').toLowerCase()
+
+const mappingRows = computed<MappingRow[]>(() => {
+  const sources = sourceFields.value
+  const targets = targetColumns.value
+  const targetMap = new Map(targets.map((c) => [c.name.toLowerCase(), c]))
+  const rows: MappingRow[] = []
+  const used = new Set<string>()
+
+  for (const s of sources) {
+    const key = s.name.toLowerCase()
+    const t = targetMap.get(key)
+    if (t) {
+      used.add(key)
+      const same = normalizeType(s.type) === normalizeType(t.columnType)
+      rows.push({
+        key: `s_${s.name}`,
+        sourceName: s.name,
+        sourceType: s.type,
+        targetName: t.name,
+        targetType: t.columnType,
+        status: same ? 'MATCH' : 'TYPE_DIFF',
+        statusText: same ? '已匹配' : '类型不一致',
+        statusClass: same ? 'is-ok' : 'is-warn'
+      })
+    } else {
+      rows.push({
+        key: `s_${s.name}`,
+        sourceName: s.name,
+        sourceType: s.type,
+        status: 'MISSING_IN_TARGET',
+        statusText: '目标表缺列',
+        statusClass: 'is-new'
+      })
+    }
+  }
+
+  for (const t of targets) {
+    if (used.has(t.name.toLowerCase())) continue
+    if (sources.some((s) => s.name.toLowerCase() === t.name.toLowerCase())) continue
+    rows.push({
+      key: `t_${t.name}`,
+      targetName: t.name,
+      targetType: t.columnType,
+      status: 'MISSING_IN_SOURCE',
+      statusText: '目标表多余',
+      statusClass: 'is-extra'
+    })
+  }
+  return rows
+})
+
+const mappingSummary = computed(() => {
+  if (!formData.value.targetTable || !mappingRows.value.length) return ''
+  if (!targetColumns.value.length) return '目标表不存在，可点「更新（新建）目标表」创建'
+  const miss = mappingRows.value.filter((r) => r.status === 'MISSING_IN_TARGET').length
+  const extra = mappingRows.value.filter((r) => r.status === 'MISSING_IN_SOURCE').length
+  const diff = mappingRows.value.filter((r) => r.status === 'TYPE_DIFF').length
+  const parts = [`共 ${mappingRows.value.length} 行`]
+  if (miss) parts.push(`缺 ${miss} 列`)
+  if (extra) parts.push(`多 ${extra} 列`)
+  if (diff) parts.push(`类型不一致 ${diff}`)
+  if (!miss && !extra && !diff) parts.push('结构与映射一致')
+  return parts.join(' · ')
+})
+
+const filterTableOption = (input: string, option: { value: string }) =>
+  option.value.toLowerCase().includes((input || '').toLowerCase())
+
+const refreshMapping = async (force = false) => {
+  if (!formData.value.targetDsId) {
+    targetTableOptions.value = []
+    targetColumns.value = []
+    return
+  }
+  const table = (formData.value.targetTable || '').trim()
+  if (!force && table === lastMappingTable) {
+    return
+  }
+  mappingLoading.value = true
+  try {
+    const tables = await listTargetTables(formData.value.targetDsId)
+    targetTableOptions.value = tables.map((t) => ({ value: t }))
+    targetColumns.value = table
+      ? await describeTargetTable(formData.value.targetDsId, table)
+      : []
+    lastMappingTable = table
+  } catch (e) {
+    targetColumns.value = []
+  } finally {
+    mappingLoading.value = false
+  }
+}
+
+const onTargetDsChange = async () => {
+  lastMappingTable = ''
+  targetColumns.value = []
+  await refreshMapping(true)
+}
+
+const onTargetTableChange = async () => {
+  await refreshMapping()
+}
+
+// ===== 目标表结构变更确认弹窗 =====
+const schemaModal = ref({
+  visible: false,
+  submitting: false,
+  tableExists: false,
+  addColumns: [] as { name: string; type: string }[],
+  dropCandidates: [] as string[],
+  dropColumns: [] as string[],
+  currentKeys: [] as string[],
+  keyCandidates: [] as string[],
+  primaryKeys: [] as string[]
+})
+
+const openSchemaModal = () => {
+  const add = mappingRows.value
+    .filter((r) => r.status === 'MISSING_IN_TARGET' && r.sourceName)
+    .map((r) => ({ name: r.sourceName as string, type: r.sourceType || 'TEXT' }))
+  const drop = mappingRows.value
+    .filter((r) => r.status === 'MISSING_IN_SOURCE' && r.targetName)
+    .map((r) => r.targetName as string)
+  const currentKeys = targetColumns.value.filter((c) => c.primaryKey).map((c) => c.name)
+  const candidates = sourceFieldNames.value
+
+  // 主键默认沿用现有主键；没有则按增量同步的比对主键预选
+  let defaultKeys = currentKeys.filter((k) =>
+    candidates.some((c) => c.toLowerCase() === k.toLowerCase())
+  )
+  if (!defaultKeys.length && formData.value.writeMode === 'SYNC') {
+    const upsertKeys = parseKeysLower(formData.value.upsertKeys)
+    defaultKeys = candidates.filter((c) => upsertKeys.includes(c.toLowerCase()))
+  }
+
+  schemaModal.value = {
+    visible: true,
+    submitting: false,
+    tableExists: targetColumns.value.length > 0,
+    addColumns: add,
+    dropCandidates: drop,
+    dropColumns: [...drop],
+    currentKeys,
+    keyCandidates: candidates,
+    primaryKeys: defaultKeys
+  }
+}
+
+const submitSchema = async () => {
+  if (!formData.value.targetDsId || !formData.value.targetTable) {
+    message.warning('请先选择目标数据源与目标表')
+    return
+  }
+  if (!schemaModal.value.addColumns.length && !schemaModal.value.dropColumns.length) {
+    message.warning('没有需要变更的字段')
+    return
+  }
+  schemaModal.value.submitting = true
+  try {
+    const res = await applyTargetSchema({
+      datasourceId: formData.value.targetDsId,
+      table: formData.value.targetTable.trim(),
+      addColumns: schemaModal.value.addColumns,
+      dropColumns: schemaModal.value.dropColumns,
+      primaryKeys: schemaModal.value.primaryKeys,
+      dropPrimaryKey: false
+    })
+    message.success(
+      res.created ? `已新建目标表 ${res.table}` : `目标表已更新，执行 ${res.statements} 条语句`
+    )
+    schemaModal.value.visible = false
+    lastMappingTable = ''
+    await refreshMapping(true)
+  } finally {
+    schemaModal.value.submitting = false
   }
 }
 // table=结构化条件，text=直接编辑 FilterString
@@ -2777,6 +3131,10 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     // 新建流程时自动套用已保存凭证，省去每次手填
     await loadCredentialSilently()
   }
+
+  // 按目标数据源刷新表清单与表结构（用于字段映射）
+  lastMappingTable = ''
+  refreshMapping(true).catch(() => {})
 }
 
 const handleBack = () => {
@@ -3328,6 +3686,140 @@ defineExpose({ open })
   font-size: 13px;
   font-weight: 600;
   color: #185fa5;
+}
+
+.map-box {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px dashed #cfe3f7;
+  border-radius: 6px;
+}
+
+.map-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.map-title {
+  flex: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: #185fa5;
+}
+
+.map-sub {
+  flex: 1;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.map-empty {
+  padding: 12px 4px;
+  font-size: 12px;
+  color: #bfbfbf;
+}
+
+.map-table {
+  overflow: hidden;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+}
+
+.map-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 40px 1.4fr 1fr 110px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.map-row:last-child {
+  border-bottom: none;
+}
+
+.map-row-head {
+  background: #fafafa;
+  font-weight: 600;
+  color: #595959;
+}
+
+.map-name,
+.map-type {
+  overflow: hidden;
+  font-family: Consolas, Monaco, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-name {
+  color: #262626;
+}
+
+.map-type {
+  color: #8c8c8c;
+}
+
+.map-arrow {
+  color: #bfbfbf;
+  text-align: center;
+}
+
+.map-status {
+  font-size: 12px;
+  text-align: right;
+}
+
+.map-status.is-ok {
+  color: #237804;
+}
+
+.map-status.is-warn {
+  color: #d46b08;
+}
+
+.map-status.is-new {
+  color: #185fa5;
+}
+
+.map-status.is-extra {
+  color: #cf1322;
+}
+
+.schema-section {
+  margin-bottom: 16px;
+}
+
+.schema-title {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #262626;
+}
+
+.schema-empty {
+  font-size: 12px;
+  color: #bfbfbf;
+}
+
+.schema-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.schema-name {
+  width: 240px;
+  overflow: hidden;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .filt-row {
