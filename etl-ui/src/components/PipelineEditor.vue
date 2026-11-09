@@ -265,14 +265,9 @@
                         <a-form-item label="登录密码 (password)" required>
                           <a-input-password
                             v-model:value="kingdeeConfig.password"
-                            :placeholder="
-                              hasSavedPassword ? '已保存，留空即使用已保存的密码' : '请输入登录密码'
-                            "
+                            placeholder="请输入登录密码"
                             @change="syncKingdeeLoginBody"
                           />
-                          <div v-if="hasSavedPassword" class="fk-hint">
-                            密码已加密保存，界面上永不回显；留空时后端自动使用已保存密码
-                          </div>
                         </a-form-item>
                       </a-col>
                       <a-col :span="6">
@@ -1330,6 +1325,9 @@ const customAuthConfig = ref({
   extractPath: '$.token'
 })
 
+// 已保存凭证的占位符：界面上回填 8 个星号，实际提交时视为「留空」由后端兜底
+const PASSWORD_SENTINEL = '********'
+
 // 金蝶客户端
 const savingCredential = ref(false)
 const loadingCredential = ref(false)
@@ -1408,9 +1406,19 @@ const onKingdeeLoginUrlChange = () => {
   syncKingdeeLoginBody()
 }
 
+// 实际提交的密码：占位星号视为空，交由后端使用已保存凭证
+const effectivePassword = () => {
+  const password = kingdeeConfig.value.password
+  return password === PASSWORD_SENTINEL ? '' : password
+}
+
 // 同步金蝶登录表单至 apiAuthConfig
 const syncKingdeeLoginBody = () => {
-  formData.value.apiAuthConfig = JSON.stringify(kingdeeConfig.value)
+  // 占位星号不能被当成真密码发出去，统一转成空串交给后端用已保存凭证兜底
+  formData.value.apiAuthConfig = JSON.stringify({
+    ...kingdeeConfig.value,
+    password: effectivePassword()
+  })
 }
 
 // 同步金蝶单据参数至 Body
@@ -1558,7 +1566,7 @@ const handlePullKingdeeFields = async () => {
       loginUrl: kingdeeConfig.value.loginUrl,
       acctID: kingdeeConfig.value.acctID,
       userName: kingdeeConfig.value.userName,
-      password: kingdeeConfig.value.password,
+      password: effectivePassword() || undefined,
       lcid: kingdeeConfig.value.lcid,
       formId: kingdeeQuery.value.formId
     })
@@ -1682,7 +1690,8 @@ const applyCredentialToForm = (credential: KingdeeCredentialMasked) => {
     loginUrl: credential.loginUrl || kingdeeConfig.value.loginUrl,
     acctID: credential.acctID || '',
     userName: credential.userName || '',
-    password: '',
+    // 已保存密码用 8 个星号占位，让界面看起来是填好的；提交时会被转成空串
+    password: credential.hasPassword ? PASSWORD_SENTINEL : '',
     lcid: credential.lcid || 2052
   }
   hasSavedPassword.value = !!credential.hasPassword
@@ -1713,12 +1722,12 @@ const handleSaveCredential = async () => {
       loginUrl: kingdeeConfig.value.loginUrl.trim(),
       acctID: kingdeeConfig.value.acctID?.trim(),
       userName: kingdeeConfig.value.userName?.trim(),
-      password: kingdeeConfig.value.password || undefined,
+      password: effectivePassword() || undefined,
       lcid: kingdeeConfig.value.lcid
     })
     hasSavedPassword.value = !!saved?.hasPassword
-    // 保存后立即清空表单里的明文密码，并同步到 apiAuthConfig
-    kingdeeConfig.value.password = ''
+    // 保存后统一回填占位星号，界面不再保留明文
+    kingdeeConfig.value.password = hasSavedPassword.value ? PASSWORD_SENTINEL : ''
     syncKingdeeLoginBody()
     message.success('凭证已加密保存，之后无需再手填密码')
   } finally {
@@ -1797,7 +1806,7 @@ const handleTestLogin = async () => {
       return
     }
     syncKingdeeLoginBody()
-    authConfigStr = JSON.stringify(kingdeeConfig.value)
+    authConfigStr = formData.value.apiAuthConfig || ''
   } else if (authType === 'CUSTOM_LOGIN') {
     if (!customAuthConfig.value.loginUrl) {
       message.warning('请先填写通用登录验证接口 URL')

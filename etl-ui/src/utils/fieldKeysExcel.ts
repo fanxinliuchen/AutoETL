@@ -152,8 +152,17 @@ export function inferFieldType(fieldKey: string): string {
   if (!key) return 'TEXT'
   const leaf = key.includes('.') ? key.slice(key.lastIndexOf('.') + 1) : key
   if (leaf.endsWith('ID') || leaf === 'FID') return 'BIGINT'
-  if (leaf.includes('DATETIME') || (leaf.includes('TIME') && !leaf.includes('DATE'))) return 'DATETIME'
-  if (leaf.includes('DATE')) return 'DATE'
+  // 日期统一 DATETIME：金蝶返回 2026-11-09T10:30:00，落 DATE 列会静默丢掉时分秒
+  if (leaf.includes('DATE') || leaf.includes('TIME')) return 'DATETIME'
+  // 金蝶布尔字段用 FIsXxx 命名（含税/赠品等），须排在金额规则之前
+  if (
+    leaf.startsWith('FIS') ||
+    leaf.startsWith('IS') ||
+    leaf.includes('INCLUDED') ||
+    leaf.includes('EXCLUDED')
+  ) {
+    return 'VARCHAR(16)'
+  }
   if (
     ['AMOUNT', 'PRICE', 'QTY', 'RATE', 'TAX', 'COST', 'WEIGHT', 'VOLUME', 'BALANCE'].some((t) =>
       leaf.includes(t)

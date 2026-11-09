@@ -16,20 +16,29 @@ import org.springframework.stereotype.Component;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * 金蝶云星空表单元数据客户端。
  *
  * <p>登录（复用 KINGDEE_K3 鉴权流程）后调用 DynamicFormService.QueryBusinessInfo，
- * 拉取指定表单的全部字段定义，自动带出字段标识、中文名与数据类型，
- * 免去手工拼写 FieldKeys。
+ * 拉取指定表单的全部字段定义，自动带出字段标识、中文名与数据类型。
  *
- * <p>注意：金蝶各版本 QueryBusinessInfo 的返回结构存在差异，因此解析采用
- * 「递归查找形似字段定义的节点」的容错策略，而不是绑定某个固定层级。
+ * <p>真实返回结构（已实测 PUR_PurchaseOrder）：
+ * <pre>
+ * Result.NeedReturnData.Entrys[].Fields[] = {
+ *   "Key": "FBillNo",                 // 查询时使用的字段键
+ *   "Name": [{"Key":2052,"Value":"单据编号"}],  // 多语言名称，Value 才是中文名
+ *   "FieldName": "FBILLNO",           // 数据库物理列名（大写）
+ *   "FieldType": 231,                 // 数字枚举，非字符串
+ *   "Extends": [...],                 // 有值表示枚举字段
+ *   "LookUpObjectFormId": "BD_Supplier", // 有值表示基础资料引用
+ *   "Editlen": 50                     // 文本长度
+ * }
+ * </pre>
+ *
+ * <p>注意：Entry（单据体）节点也带 Key/Name，必须排除，否则会把 FBillHead 当成字段。
  */
 @Slf4j
 @Component
@@ -39,14 +48,8 @@ public class KingdeeMetadataClient {
     private static final String QUERY_BUSINESS_INFO_PATH =
             "/k3cloud/Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.QueryBusinessInfo.common.kdsvc";
 
-    /** 字段标识候选键，按优先级排列 */
-    private static final String[] KEY_FIELDS = {"Key", "FieldKey", "FieldId", "FieldName"};
-
-    /** 中文名候选键 */
-    private static final String[] LABEL_FIELDS = {"Caption", "DisplayName", "Name", "Title", "FieldName"};
-
-    /** 类型候选键 */
-    private static final String[] TYPE_FIELDS = {"FieldType", "DataType", "ValueType", "Type"};
+    /** 字段标识候选键，按优先级排列（Key 是查询键，FieldName 是物理列名，故 Key 优先） */
+    private static final String[] KEY_FIELDS = {"Key", "FieldKey", "FieldId"};
 
     private final WebApiExtractor webApiExtractor;
 
@@ -80,6 +83,9 @@ public class KingdeeMetadataClient {
         } catch (Exception e) {
             throw new BizException(ErrorCode.PARAM_ERROR, "调用金蝶元数据接口异常: " + e.getMessage());
         }
+
+        log.debug("金蝶 QueryBusinessInfo 原始返回(FormId={}): {}",
+                dto.getFormId(), StrUtil.brief(responseBody, 4000));
 
         return parseFields(responseBody, dto.getFormId());
     }
@@ -143,24 +149,23 @@ public class KingdeeMetadataClient {
         collectFieldCandidates(root, candidates);
 
         Map<String, Map<String, Object>> merged = new LinkedHashMap<>();
-        for (JSONObject candidate : candidates) {
-            String key = firstNonBlank(candidate, KEY_FIELDS);
-            if (StrUtil.isBlank(key)) {
+        for (JSONObject field : candidates) {
+            String key = firstNonBlank(field, KEY_FIELDS);
+            if (StrUtil.isBlank(key) || !key.matches("[A-Za-z_][A-Za-z0-9_.]*")) {
                 continue;
             }
-            // 字段标识里出现空格/中文的，基本不是真实字段键，跳过
-            if (!key.matches("[A-Za-z_][A-Za-z0-9_.]*")) {
-                continue;
+            String label = extractLabel(field);
+            if (StrUtil.isNotBlank(label) && label.equalsIgnoreCase(key)) {
+                label = null;
             }
-            String label = firstNonBlank(candidate, LABEL_FIELDS);
-            String rawType = firstNonBlank(candidate, TYPE_FIELDS);
-            String type = mapKingdeeType(rawType, key);
+            String typeHint = describeFieldType(field);
+            String type = resolveFieldType(field, key);
 
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("key", key);
             item.put("label", StrUtil.blankToDefault(label, key));
             item.put("type", type);
-            item.put("rawType", StrUtil.nullToEmpty(rawType));
+            item.put("rawType", typeHint);
             merged.putIfAbsent(key.toUpperCase(), item);
         }
 
@@ -169,6 +174,97 @@ public class KingdeeMetadataClient {
                     "未能从返回结果中识别出字段定义，原始返回片段: " + StrUtil.brief(responseBody, 200));
         }
         return new ArrayList<>(merged.values());
+    }
+
+    /**
+     * 取中文名：金蝶把名称放在 Name 数组里，形如 [{"Key":2052,"Value":"单据编号"}]
+     */
+    private String extractLabel(JSONObject field) {
+        Object name = field.get("Name");
+        if (name instanceof JSONArray array) {
+            String fallback = null;
+            for (Object item : array) {
+                if (!(item instanceof JSONObject entry)) {
+                    continue;
+                }
+                String value = entry.getStr("Value");
+                if (StrUtil.isBlank(value)) {
+                    continue;
+                }
+                Integer lang = entry.getInt("Key");
+                if (lang != null && lang == 2052) {
+                    return value.trim();
+                }
+                if (fallback == null) {
+                    fallback = value.trim();
+                }
+            }
+            if (fallback != null) {
+                return fallback;
+            }
+        } else if (name instanceof String text && StrUtil.isNotBlank(text)) {
+            return text.trim();
+        }
+        // 兜底：部分版本用 Caption 存中文名
+        String caption = field.getStr("Caption");
+        return StrUtil.isBlank(caption) ? null : caption.trim();
+    }
+
+    /**
+     * 字段类型推断的「人类可读」说明，用于前端展示
+     */
+    private String describeFieldType(JSONObject field) {
+        if (field.get("Extends") instanceof JSONArray ext && !ext.isEmpty()) {
+            return "枚举";
+        }
+        if (StrUtil.isNotBlank(field.getStr("LookUpObjectFormId"))) {
+            return "基础资料";
+        }
+        Integer editlen = field.getInt("Editlen");
+        if (editlen != null && editlen > 0) {
+            return "文本(" + editlen + ")";
+        }
+        String fieldType = field.getStr("FieldType");
+        return StrUtil.blankToDefault(fieldType, "");
+    }
+
+    /**
+     * 依据元数据信号定类型，信号不足时回退到按字段名推断
+     */
+    private String resolveFieldType(JSONObject field, String key) {
+        // 1. 枚举字段：返回的是编码字符串
+        if (field.get("Extends") instanceof JSONArray ext && !ext.isEmpty()) {
+            return "VARCHAR(32)";
+        }
+        // 2. 基础资料：裸字段返回内码(数字)，点号子字段返回编码(字符串)
+        if (StrUtil.isNotBlank(field.getStr("LookUpObjectFormId"))) {
+            return key.contains(".") ? "VARCHAR(255)" : "BIGINT";
+        }
+        // 3. 文本长度可知
+        Integer editlen = field.getInt("Editlen");
+        if (editlen != null && editlen > 0) {
+            return "VARCHAR(" + Math.min(editlen, 255) + ")";
+        }
+        // 4. 其它（日期/金额/数量等）用字段名推断，日期一律 DATETIME 避免截断时分秒
+        return inferTypeByKey(key);
+    }
+
+    /**
+     * 只认真正的字段节点：Entry（单据体）节点没有 FieldName/FieldType，借此排除
+     */
+    private boolean looksLikeField(JSONObject obj) {
+        if (StrUtil.isNotBlank(obj.getStr("FieldName"))) {
+            return true;
+        }
+        if (obj.get("FieldType") != null || obj.get("ElementType") != null) {
+            return true;
+        }
+        // 兼容其它版本：带 Caption 的扁平结构
+        if (StrUtil.isNotBlank(obj.getStr("Caption"))) {
+            return true;
+        }
+        // 兼容其它版本：有标识键 + 字符串型 Name（单据体节点的 Name 是数组，会被排除）
+        return firstNonBlank(obj, KEY_FIELDS) != null && obj.get("Name") instanceof String;
     }
 
     private void assertSuccess(JSONObject root, String formId) {
@@ -206,7 +302,7 @@ public class KingdeeMetadataClient {
     }
 
     /**
-     * 递归查找形似字段定义的节点（同时具备标识键与名称/类型键）
+     * 递归查找字段节点
      */
     private void collectFieldCandidates(Object node, List<JSONObject> out) {
         if (node instanceof JSONObject obj) {
@@ -223,15 +319,6 @@ public class KingdeeMetadataClient {
         }
     }
 
-    private boolean looksLikeField(JSONObject obj) {
-        String key = firstNonBlank(obj, KEY_FIELDS);
-        if (StrUtil.isBlank(key)) {
-            return false;
-        }
-        return StrUtil.isNotBlank(firstNonBlank(obj, LABEL_FIELDS))
-                || StrUtil.isNotBlank(firstNonBlank(obj, TYPE_FIELDS));
-    }
-
     private String firstNonBlank(JSONObject obj, String[] fields) {
         for (String field : fields) {
             Object value = obj.get(field);
@@ -243,7 +330,7 @@ public class KingdeeMetadataClient {
     }
 
     /**
-     * 金蝶字段类型 -> 本项目临时表类型白名单
+     * 金蝶字段类型字符串 -> 本项目临时表类型白名单（供其它版本使用）
      */
     String mapKingdeeType(String rawType, String fieldKey) {
         String type = StrUtil.nullToEmpty(rawType).toUpperCase();
@@ -273,7 +360,10 @@ public class KingdeeMetadataClient {
     }
 
     /**
-     * 按字段名推断类型（元数据缺失时的兜底，同时供前端「推断类型」保持一致口径）
+     * 按字段名推断类型（元数据信号不足时的兜底，与前端「推断类型」保持同一口径）。
+     *
+     * <p>日期统一推 DATETIME 而非 DATE：金蝶返回形如 2026-11-09T10:30:00，
+     * 落 DATE 列会静默丢掉时分秒。
      */
     public static String inferTypeByKey(String fieldKey) {
         String key = StrUtil.nullToEmpty(fieldKey).toUpperCase();
@@ -284,11 +374,14 @@ public class KingdeeMetadataClient {
         if (leaf.endsWith("ID") || leaf.equals("FID")) {
             return "BIGINT";
         }
-        if (leaf.contains("DATETIME") || (leaf.contains("TIME") && !leaf.contains("DATE"))) {
+        if (leaf.contains("DATE") || leaf.contains("TIME")) {
             return "DATETIME";
         }
-        if (leaf.contains("DATE")) {
-            return "DATE";
+        // 金蝶布尔字段习惯用 FIsXxx 命名（如 FIsIncludedTax 含税、FIsFreeGift 赠品），
+        // 必须放在金额规则之前，否则含 "TAX" 的布尔字段会被误判成 DECIMAL
+        if (leaf.startsWith("FIS") || leaf.startsWith("IS") || leaf.contains("INCLUDED")
+                || leaf.contains("EXCLUDED")) {
+            return "VARCHAR(16)";
         }
         if (leaf.contains("AMOUNT") || leaf.contains("PRICE") || leaf.contains("QTY")
                 || leaf.contains("RATE") || leaf.contains("TAX") || leaf.contains("COST")
