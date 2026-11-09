@@ -10,6 +10,7 @@ import com.dhp.etl.core.extractor.MySqlExtractor;
 import com.dhp.etl.core.extractor.WebApiExtractor;
 import com.dhp.etl.core.guard.SqlSafetyGuard;
 import com.dhp.etl.core.loader.MySqlDwLoader;
+import com.dhp.etl.core.transformer.AutoInsertSqlBuilder;
 import com.dhp.etl.core.transformer.SqlTransformExecutor;
 import com.dhp.etl.entity.EtlPipeline;
 import com.dhp.etl.entity.EtlTaskInstance;
@@ -45,6 +46,7 @@ public class PipelineExecutor {
     private final MySqlExtractor mySqlExtractor;
     private final WebApiExtractor webApiExtractor;
     private final SqlTransformExecutor sqlTransformExecutor;
+    private final AutoInsertSqlBuilder autoInsertSqlBuilder;
     private final MySqlDwLoader mySqlDwLoader;
     private final SqlSafetyGuard sqlSafetyGuard;
     private final AlertService alertService;
@@ -57,6 +59,7 @@ public class PipelineExecutor {
     public PipelineExecutor(MySqlExtractor mySqlExtractor,
                             WebApiExtractor webApiExtractor,
                             SqlTransformExecutor sqlTransformExecutor,
+                            AutoInsertSqlBuilder autoInsertSqlBuilder,
                             MySqlDwLoader mySqlDwLoader,
                             SqlSafetyGuard sqlSafetyGuard,
                             AlertService alertService,
@@ -66,6 +69,7 @@ public class PipelineExecutor {
         this.mySqlExtractor = mySqlExtractor;
         this.webApiExtractor = webApiExtractor;
         this.sqlTransformExecutor = sqlTransformExecutor;
+        this.autoInsertSqlBuilder = autoInsertSqlBuilder;
         this.mySqlDwLoader = mySqlDwLoader;
         this.sqlSafetyGuard = sqlSafetyGuard;
         this.alertService = alertService;
@@ -84,9 +88,10 @@ public class PipelineExecutor {
             return;
         }
 
-        if (pipeline.getTargetDsId() == null || StrUtil.isBlank(pipeline.getTargetTable()) || StrUtil.isBlank(pipeline.getTransformSql())) {
+        // 转换 SQL 允许为空：为空时按目标表结构自动生成直通入库脚本
+        if (pipeline.getTargetDsId() == null || StrUtil.isBlank(pipeline.getTargetTable())) {
             log.warn("[ETL] 流程 {} 属于草稿/未完整配置状态，无法执行", pipeline.getPipelineCode());
-            throw new BizException(ErrorCode.PARAM_ERROR, "流程配置尚未完善（缺少目标数仓连接或转换SQL），请先编辑完善后再运行");
+            throw new BizException(ErrorCode.PARAM_ERROR, "流程配置尚未完善（缺少目标数仓连接或目标表），请先编辑完善后再运行");
         }
 
         // 并发防重保护
@@ -103,16 +108,25 @@ public class PipelineExecutor {
             logBuffer.append(String.format("[%s] ===== ETL 流程启动: %s =====\n",
                     LocalDateTime.now(), pipeline.getPipelineName()));
 
+            // 临时表名提前确定：未配置转换 SQL 时，入库脚本要按它生成
+            String stageTable = "stg_" + pipeline.getPipelineCode().toLowerCase();
+            // 转换 SQL 为空时走「自动直通入库」，脚本在抽取完成后按目标表结构生成
+            boolean autoTransform = StrUtil.isBlank(pipeline.getTransformSql());
+
             // 1. SQL 预检安全守卫
             logBuffer.append("[校验] 执行 SQL AST 安全白名单校验...\n");
-            sqlSafetyGuard.validate(pipeline.getTransformSql());
+            if (!autoTransform) {
+                sqlSafetyGuard.validate(pipeline.getTransformSql());
+            }
             if (pipeline.getSourceType() == SourceTypeEnum.MYSQL && StrUtil.isNotBlank(pipeline.getSourceQuerySql())) {
                 sqlSafetyGuard.validate(pipeline.getSourceQuerySql());
             }
             logBuffer.append("[校验] SQL 语法与白名单校验通过\n");
+            if (autoTransform) {
+                logBuffer.append("[校验] 未配置转换 SQL，将在抽取完成后按目标表结构自动生成入库脚本\n");
+            }
 
             // 2. 数据抽取与暂存 (Staging)
-            String stageTable = "stg_" + pipeline.getPipelineCode().toLowerCase();
             // 临时表列类型来自字段清单（白名单归一化，未配置的列仍为 TEXT）
             Map<String, String> columnTypes = FieldMetaResolver.parseColumnTypes(pipeline.getFieldMeta());
             AtomicLong readCount = new AtomicLong(0);
@@ -143,16 +157,35 @@ public class PipelineExecutor {
             logBuffer.append(String.format("[暂存] 数据已成功载入临时表 %s，行数: %d\n", stageTable, readCount.get()));
 
             // 3. 执行 SQL 转换与入库脚本 (Transform)
-            logBuffer.append("[处理] 正在执行 SQL 处理与入库脚本...\n");
-            long affectedRows = sqlTransformExecutor.executeScript(
-                    pipeline.getTargetDsId(),
-                    pipeline,
-                    stageTable,
-                    instance.getId(),
-                    logBuffer
-            );
+            long affectedRows = 0;
+            if (autoTransform) {
+                if (readCount.get() == 0) {
+                    logBuffer.append("[处理] 未配置转换 SQL 且本次抽取 0 行，跳过入库\n");
+                } else {
+                    String autoSql = autoInsertSqlBuilder.build(pipeline, stageTable, logBuffer);
+                    logBuffer.append("[处理] 自动生成的入库脚本:\n").append(autoSql).append("\n");
+                    sqlSafetyGuard.validate(autoSql);
+                    affectedRows = sqlTransformExecutor.executeScript(
+                            pipeline.getTargetDsId(),
+                            pipeline,
+                            stageTable,
+                            instance.getId(),
+                            autoSql,
+                            logBuffer
+                    );
+                }
+            } else {
+                logBuffer.append("[处理] 正在执行 SQL 处理与入库脚本...\n");
+                affectedRows = sqlTransformExecutor.executeScript(
+                        pipeline.getTargetDsId(),
+                        pipeline,
+                        stageTable,
+                        instance.getId(),
+                        logBuffer
+                );
+            }
             instance.setWriteCount(affectedRows);
-            logBuffer.append(String.format("[入库] SQL 转换入库执行完成，目标受影响行数: %d\n", affectedRows));
+            logBuffer.append(String.format("[入库] 入库执行完成，目标受影响行数: %d\n", affectedRows));
 
             // 4. 清空临时表 (可选清理)
             mySqlDwLoader.truncateStageTable(pipeline.getTargetDsId(), stageTable);

@@ -1249,7 +1249,7 @@
             <div class="tab-pane-content">
               <a-alert
                 message="💡 数据流转机制说明"
-                description="步骤2抽取的数据将首先自动加载至当前流程的专属临时表 ${stage_table}。您可在此编写原生 SQL 语句进行清洗、关联、计算，并最终写入数仓目标表 ${target_table}。"
+                description="步骤2抽取的数据将首先自动加载至当前流程的专属临时表 ${stage_table}。您可在此编写原生 SQL 语句进行清洗、关联、计算，并最终写入数仓目标表 ${target_table}；留空则由系统按目标表结构自动生成直通入库脚本。"
                 type="info"
                 show-icon
                 style="margin-bottom: 16px"
@@ -1265,6 +1265,11 @@ SELECT id, material_code, name, '${today}'
 FROM ${stage_table}
 ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                   />
+                  <div class="fk-hint" style="margin-top: 8px">
+                    留空即可：系统会按目标表与抽取字段的<b>同名列</b>自动生成
+                    <code>INSERT INTO ... SELECT ...</code>（按写入模式决定是否先清空、是否 UPSERT）。
+                    需要改字段名、聚合、过滤或多表关联时，再在这里写脚本。
+                  </div>
                 </a-form-item>
               </a-card>
 
@@ -2011,8 +2016,9 @@ const scheduleChecked = computed({
   }
 })
 
+// 转换 SQL 可为空：留空时后端按目标表结构自动生成直通入库脚本
 const isDraft = computed(() => {
-  return !formData.value.targetDsId || !formData.value.targetTable || !formData.value.transformSql
+  return !formData.value.targetDsId || !formData.value.targetTable
 })
 
 const formRules = {
@@ -2752,11 +2758,11 @@ const handleCompleteSave = async () => {
   }
 
   // 检查是否具备可运行的完整性（目标数仓、目标表、转换SQL）
-  const isIncomplete = !formData.value.targetDsId || !formData.value.targetTable || !formData.value.transformSql
+  const isIncomplete = !formData.value.targetDsId || !formData.value.targetTable
   if (isIncomplete) {
     const saved = await handleSaveStep(true)
     if (saved) {
-      message.warning('当前流程已暂存为【草稿】！因尚未配置数仓目标库或转换SQL，暂无法启用调度与运行')
+      message.warning('当前流程已暂存为【草稿】！因尚未配置目标数据源或目标表，暂无法启用调度与运行')
       emit('success')
     }
     return

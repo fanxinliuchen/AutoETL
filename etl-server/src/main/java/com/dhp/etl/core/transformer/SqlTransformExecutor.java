@@ -39,7 +39,18 @@ public class SqlTransformExecutor {
                               String stageTable,
                               Long batchId,
                               StringBuilder logBuffer) throws Exception {
-        String script = pipeline.getTransformSql();
+        return executeScript(targetDsId, pipeline, stageTable, batchId, pipeline.getTransformSql(), logBuffer);
+    }
+
+    /**
+     * 执行指定脚本（用于「未配置转换 SQL 时自动生成」的场景，不会把生成的脚本写回流程配置）
+     */
+    public long executeScript(Long targetDsId,
+                              EtlPipeline pipeline,
+                              String stageTable,
+                              Long batchId,
+                              String script,
+                              StringBuilder logBuffer) throws Exception {
         if (StrUtil.isBlank(script)) {
             return 0;
         }
