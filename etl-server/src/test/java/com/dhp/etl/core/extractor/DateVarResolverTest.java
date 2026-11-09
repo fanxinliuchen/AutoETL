@@ -33,26 +33,19 @@ class DateVarResolverTest {
     }
 
     @Test
-    @DisplayName("${today-60d} 解析为 60 天前")
-    void resolveOffsetDays() {
-        assertEquals(daysAgo(60), DateVarResolver.resolve("${today-60d}"));
-        assertEquals(daysAgo(7), DateVarResolver.resolve("${today-7d}"));
-        assertEquals(daysAgo(-7), DateVarResolver.resolve("${today+7d}"));
+    @DisplayName("已废弃的偏移写法不再解析，交由变量解析器报错")
+    void offsetSyntaxDeprecated() {
+        assertEquals("${today-60d}", DateVarResolver.resolve("${today-60d}"));
+        assertEquals("${today+7d}", DateVarResolver.resolve("${today+7d}"));
+        assertEquals("${acctWeekStart-1w}", DateVarResolver.resolve("${acctWeekStart-1w}"));
     }
 
     @Test
-    @DisplayName("月份偏移按自然月计算")
-    void resolveOffsetMonths() {
-        String expected = LocalDate.now().minusMonths(1).format(DATE);
-        assertEquals(expected, DateVarResolver.resolve("${today-1m}"));
-    }
-
-    @Test
-    @DisplayName("完整过滤条件中的多个变量全部替换")
+    @DisplayName("完整过滤条件中的内置变量全部替换")
     void resolveInsideFilterString() {
-        String filter = "FModifyDate >= '${today-60d}' AND FModifyDate < '${today}'";
+        String filter = "FModifyDate >= '${yesterday}' AND FModifyDate < '${today}'";
         String resolved = DateVarResolver.resolve(filter);
-        assertEquals("FModifyDate >= '" + daysAgo(60) + "' AND FModifyDate < '" + today() + "'", resolved);
+        assertEquals("FModifyDate >= '" + daysAgo(1) + "' AND FModifyDate < '" + today() + "'", resolved);
     }
 
     @Test

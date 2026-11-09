@@ -2,26 +2,32 @@ package com.dhp.etl.core.extractor;
 
 import cn.hutool.core.util.StrUtil;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 请求体里的日期变量解析器。
+ * 内置日期变量替换。
  *
- * <p>支持写法：${today}、${yesterday}、${now}，以及带偏移的
- * ${today-60d}、${today+7d}、${yesterday-1m}、${today-1y}。
- * 单位：d=天、m=月、y=年；解析结果形如 2026-11-09。
+ * <p>只保留三个无参数内置变量：${today}、${yesterday}、${now}。
  *
- * <p>之所以放在后端解析而不是界面生成：流程通常是定时跑的，
- * 若在界面上算成固定日期，第二天跑就还是旧区间。
+ * <p>原 ${today-60d} / ${acctWeekStart-1w} 这类偏移写法已废弃：
+ * 需要「上个会计周」等复杂口径时，请改用过滤条件面板的「变量定义」，
+ * 直接写 SQL 计算，例如：
+ * <pre>
+ *   startdate = DATE_SUB(CURDATE(), INTERVAL ((WEEKDAY(CURDATE()) + 3) % 7 + 7) DAY)
+ *   enddate   = DATE_SUB(CURDATE(), INTERVAL ((WEEKDAY(CURDATE()) + 3) % 7 + 1) DAY)
+ * </pre>
+ * 然后在条件值里引用 ${startdate}。
+ *
+ * <p>之所以放在后端解析：流程多为定时任务，界面上算成固定日期第二天就失效了。
  */
 public final class DateVarResolver {
 
     private static final Pattern VAR_PATTERN = Pattern.compile(
-            "\\$\\{(today|yesterday|now)(?:([+-])(\\d{1,4})([dmy]))?}",
-            Pattern.CASE_INSENSITIVE);
+            "\\$\\{(today|yesterday|now)}", Pattern.CASE_INSENSITIVE);
 
     private static final DateTimeFormatter DATE_TIME_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -36,36 +42,18 @@ public final class DateVarResolver {
         Matcher matcher = VAR_PATTERN.matcher(text);
         StringBuffer buffer = new StringBuffer();
         while (matcher.find()) {
-            String replacement = evaluate(matcher);
-            matcher.appendReplacement(buffer, Matcher.quoteReplacement(replacement));
+            matcher.appendReplacement(buffer,
+                    Matcher.quoteReplacement(evaluate(matcher.group(1).toLowerCase())));
         }
         matcher.appendTail(buffer);
         return buffer.toString();
     }
 
-    private static String evaluate(Matcher matcher) {
-        String base = matcher.group(1).toLowerCase();
-        String sign = matcher.group(2);
-        String amountText = matcher.group(3);
-        String unit = matcher.group(4);
-
-        // ${now} 保留到秒，便于调试；带偏移的统一按日期输出
-        if ("now".equals(base) && sign == null) {
-            return LocalDateTime.now().format(DATE_TIME_FORMAT);
-        }
-
-        LocalDateTime time = "yesterday".equals(base) ? LocalDateTime.now().minusDays(1) : LocalDateTime.now();
-        if (sign != null && amountText != null && unit != null) {
-            int amount = Integer.parseInt(amountText);
-            boolean plus = "+".equals(sign);
-            switch (unit.toLowerCase()) {
-                case "d" -> time = plus ? time.plusDays(amount) : time.minusDays(amount);
-                case "m" -> time = plus ? time.plusMonths(amount) : time.minusMonths(amount);
-                case "y" -> time = plus ? time.plusYears(amount) : time.minusYears(amount);
-                default -> {
-                }
-            }
-        }
-        return time.toLocalDate().toString();
+    private static String evaluate(String base) {
+        return switch (base) {
+            case "yesterday" -> LocalDate.now().minusDays(1).toString();
+            case "now" -> LocalDateTime.now().format(DATE_TIME_FORMAT);
+            default -> LocalDate.now().toString();
+        };
     }
 }

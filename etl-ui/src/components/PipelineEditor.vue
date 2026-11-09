@@ -630,6 +630,46 @@
                     </a-row>
 
                     <div v-if="filterMode === 'table'" class="filt-panel">
+                      <!-- 变量定义：值由 SQL 在目标数据源上计算 -->
+                      <div class="var-box">
+                        <div class="var-head">
+                          <span class="var-title">变量定义</span>
+                          <span class="var-hint">
+                            执行时在目标数据源上以 SQL 计算，条件值里用 <code>${名称}</code> 引用；内置
+                            <code>${today}</code> <code>${yesterday}</code> <code>${now}</code>
+                          </span>
+                          <a-button size="small" type="link" @click="addVariable">
+                            <plus-outlined /> 添加变量
+                          </a-button>
+                        </div>
+                        <div v-for="(v, vi) in filterVariables" :key="v.rid" class="var-row">
+                          <a-input
+                            v-model:value="v.name"
+                            size="small"
+                            class="fk-input-mono"
+                            placeholder="变量名"
+                            style="width: 148px; flex: none"
+                            @change="applyFilterConditions"
+                          />
+                          <span class="var-eq">=</span>
+                          <a-textarea
+                            v-model:value="v.sql"
+                            size="small"
+                            class="fk-input-mono var-sql"
+                            :auto-size="{ minRows: 1, maxRows: 3 }"
+                            placeholder="SELECT 表达式，如 DATE_SUB(CURDATE(), INTERVAL ((WEEKDAY(CURDATE()) + 3) % 7 + 7) DAY)"
+                            style="flex: 1; min-width: 260px"
+                            @change="applyFilterConditions"
+                          />
+                          <a-button size="small" type="link" danger @click="removeVariable(vi)">
+                            删除
+                          </a-button>
+                        </div>
+                        <div v-if="!filterVariables.length" class="var-empty">
+                          未定义变量。需要「上个会计周」这类动态日期时，在此配置 SQL 即可，条件值选「变量」引用。
+                        </div>
+                      </div>
+
                       <div v-for="(row, index) in filterConditions" :key="row.rid" class="filt-row">
                         <a-select
                           v-if="index > 0"
@@ -643,13 +683,13 @@
                           @change="applyFilterConditions"
                         />
                         <span v-else class="filt-where">WHERE</span>
-                        <a-input
+                        <a-auto-complete
                           v-model:value="row.field"
                           size="small"
-                          list="filter-field-list"
                           class="fk-input-mono"
-                          placeholder="字段名，如 FDocumentStatus"
-                          style="flex: 1; min-width: 180px"
+                          :options="filterFieldOptions"
+                          placeholder="选择或输入字段名"
+                          style="flex: 1; min-width: 190px"
                           @change="applyFilterConditions"
                         />
                         <a-select
@@ -663,30 +703,20 @@
                           <a-select
                             v-model:value="row.valueType"
                             size="small"
-                            style="width: 108px; flex: none"
+                            style="width: 104px; flex: none"
                             :options="FILTER_VALUE_TYPES"
                             @change="applyFilterConditions"
                           />
-                          <template v-if="row.valueType === 'DATE'">
-                            <a-select
-                              v-model:value="row.dateBase"
-                              size="small"
-                              style="width: 88px; flex: none"
-                              :options="[
-                                { label: '今天', value: 'today' },
-                                { label: '昨天', value: 'yesterday' },
-                                { label: '此刻', value: 'now' }
-                              ]"
-                              @change="applyFilterConditions"
-                            />
-                            <a-input-number
-                              v-model:value="row.dateOffset"
-                              size="small"
-                              style="width: 110px; flex: none"
-                              addon-after="天"
-                              @change="applyFilterConditions"
-                            />
-                          </template>
+                          <a-auto-complete
+                            v-if="row.valueType === 'VARIABLE'"
+                            v-model:value="row.value"
+                            size="small"
+                            class="fk-input-mono"
+                            :options="variableOptions"
+                            placeholder="选择变量名，如 startdate"
+                            style="flex: 1; min-width: 160px"
+                            @change="applyFilterConditions"
+                          />
                           <a-input
                             v-else
                             v-model:value="row.value"
@@ -713,26 +743,24 @@
                           删除
                         </a-button>
                       </div>
+
                       <div v-if="!filterConditions.length" class="filt-empty">
                         尚未添加条件，点击右上角「+ 添加条件」
                       </div>
                       <div class="filt-preview">
                         生成：<code>{{ kingdeeQuery.filterString || '（空）' }}</code>
                       </div>
-                      <datalist id="filter-field-list">
-                        <option v-for="opt in filterFieldOptions" :key="opt.value" :value="opt.value" />
-                      </datalist>
                     </div>
                     <div v-else class="filt-panel">
                       <a-textarea
                         v-model:value="kingdeeQuery.filterString"
                         :rows="3"
                         class="code-textarea"
-                        placeholder="例如：FModifyDate >= '${today-60d}' AND FDocumentStatus = 'C'"
+                        placeholder="例如：FModifyDate >= '${startdate}' AND FDocumentStatus = 'C'"
                         @change="syncKingdeeQueryToBody"
                       />
                       <div class="fk-hint">
-                        文本模式原样写入 FilterString；切回结构化时会尝试解析成条件行。
+                        文本模式原样写入 FilterString；${变量} 会在执行时按「变量定义」中的 SQL 解析。
                       </div>
                     </div>
 
@@ -1553,7 +1581,7 @@ const onPaginationToggle = () => {
 }
 
 // ===== 过滤条件：多字段 · 每字段多条件 =====
-type FilterValueType = 'TEXT' | 'NUMBER' | 'DATE' | 'RAW'
+type FilterValueType = 'TEXT' | 'NUMBER' | 'VARIABLE' | 'RAW'
 
 interface FilterCondition {
   rid: string
@@ -1562,8 +1590,13 @@ interface FilterCondition {
   op: string
   valueType: FilterValueType
   value: string
-  dateBase: 'today' | 'yesterday' | 'now'
-  dateOffset: number
+}
+
+// 变量定义：值由一段 SQL 在目标数据源上实时计算
+interface FilterVariable {
+  rid: string
+  name: string
+  sql: string
 }
 
 const FILTER_OPS = [
@@ -1584,7 +1617,7 @@ const FILTER_OPS = [
 const FILTER_VALUE_TYPES = [
   { label: '文本', value: 'TEXT' },
   { label: '数字', value: 'NUMBER' },
-  { label: '日期变量', value: 'DATE' },
+  { label: '变量', value: 'VARIABLE' },
   { label: '原始表达式', value: 'RAW' }
 ]
 
@@ -1597,29 +1630,38 @@ const defaultFilterCondition = (): FilterCondition => {
     field: '',
     op: '=',
     valueType: 'TEXT',
-    value: '',
-    dateBase: 'today',
-    dateOffset: 0
+    value: ''
   }
 }
 
+const defaultFilterVariable = (): FilterVariable => {
+  filterRidSeed += 1
+  return { rid: `fv_${filterRidSeed}`, name: '', sql: '' }
+}
+
 const filterConditions = ref<FilterCondition[]>([])
+const filterVariables = ref<FilterVariable[]>([])
 // table=结构化条件，text=直接编辑 FilterString
 const filterMode = ref<'table' | 'text'>('table')
 
 const needsFilterValue = (op: string) => op !== 'IS NULL' && op !== 'IS NOT NULL'
 
-// 日期变量写法：${today}、${today-60d}、${yesterday-1m}
-const buildDateVar = (row: FilterCondition) => {
-  const offset = row.dateOffset || 0
-  if (offset === 0) {
-    return `\${${row.dateBase}}`
-  }
-  const sign = offset > 0 ? '+' : '-'
-  return `\${${row.dateBase}${sign}${Math.abs(offset)}d}`
+const quoteText = (text: string) => `'${text.replace(/'/g, "''")}'`
+
+// 变量引用统一成 ${name}：用户填 startdate 或 ${startdate} 都接受
+const variableRef = (raw: string) => {
+  const name = (raw || '').trim().replace(/^\$\{/, '').replace(/\}$/, '').trim()
+  return '${' + name + '}'
 }
 
-const quoteText = (text: string) => `'${text.replace(/'/g, "''")}'`
+// 条件「变量」下拉候选：内置变量 + 已定义的变量
+const BUILTIN_VARIABLES = ['today', 'yesterday', 'now']
+const variableOptions = computed(() => {
+  const defined = filterVariables.value
+    .filter((v) => v.name.trim())
+    .map((v) => v.name.trim())
+  return [...new Set([...BUILTIN_VARIABLES, ...defined])].map((value) => ({ value }))
+})
 
 const renderFilterValue = (row: FilterCondition) => {
   const op = row.op.toUpperCase()
@@ -1629,16 +1671,18 @@ const renderFilterValue = (row: FilterCondition) => {
       .map((s) => s.trim())
       .filter(Boolean)
     if (!items.length) return "('')"
-    const rendered = items.map((item) =>
-      row.valueType === 'NUMBER' ? item : quoteText(item)
-    )
+    const rendered = items.map((item) => {
+      if (row.valueType === 'NUMBER') return item
+      if (row.valueType === 'VARIABLE') return quoteText(variableRef(item))
+      return quoteText(item)
+    })
     return `(${rendered.join(', ')})`
   }
   switch (row.valueType) {
     case 'NUMBER':
       return row.value.trim() || '0'
-    case 'DATE':
-      return quoteText(buildDateVar(row))
+    case 'VARIABLE':
+      return quoteText(variableRef(row.value))
     case 'RAW':
       return row.value.trim()
     default:
@@ -1663,9 +1707,21 @@ const applyFilterConditions = () => {
   kingdeeQuery.value.filterString = buildFilterString()
   formData.value.filterMeta = JSON.stringify({
     mode: filterMode.value,
+    variables: filterVariables.value
+      .map((v) => ({ name: v.name.trim(), sql: v.sql.trim() }))
+      .filter((v) => v.name && v.sql),
     conditions: filterConditions.value
   })
   syncKingdeeQueryToBody()
+}
+
+const addVariable = () => {
+  filterVariables.value.push(defaultFilterVariable())
+}
+
+const removeVariable = (index: number) => {
+  filterVariables.value.splice(index, 1)
+  applyFilterConditions()
 }
 
 const addFilterCondition = () => {
@@ -1715,11 +1771,10 @@ const parseFilterString = (raw: string): FilterCondition[] | null => {
     }
     if (/^'.*'$/.test(rawValue)) {
       const inner = rawValue.slice(1, -1).replace(/''/g, "'")
-      const dateMatch = inner.match(/^\$\{(today|yesterday|now)([+-]\d+)?d?\}$/i)
-      if (dateMatch) {
-        row.valueType = 'DATE'
-        row.dateBase = dateMatch[1].toLowerCase() as 'today' | 'yesterday' | 'now'
-        row.dateOffset = dateMatch[2] ? Number(dateMatch[2]) : 0
+      const varMatch = inner.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/)
+      if (varMatch) {
+        row.valueType = 'VARIABLE'
+        row.value = varMatch[1]
       } else {
         row.valueType = 'TEXT'
         row.value = inner
@@ -1741,17 +1796,32 @@ const loadFilter = (preserveMode = false) => {
     filterMode.value = 'table'
   }
   let conditions: FilterCondition[] | null = null
+  filterVariables.value = []
   if (formData.value.filterMeta) {
     try {
       const parsed = JSON.parse(formData.value.filterMeta)
       if (parsed?.mode === 'text') {
         filterMode.value = 'text'
       }
+      if (Array.isArray(parsed?.variables)) {
+        filterVariables.value = parsed.variables
+          .filter((item: any) => item && (item.name || item.sql))
+          .map((item: any) => ({
+            rid: `fv_${++filterRidSeed}`,
+            name: String(item.name ?? ''),
+            sql: String(item.sql ?? '')
+          }))
+      }
       if (Array.isArray(parsed?.conditions)) {
         conditions = parsed.conditions.map((item: any) => ({
           ...defaultFilterCondition(),
-          ...item,
-          rid: `fc_${++filterRidSeed}`
+          connector: item?.connector === 'OR' ? 'OR' : 'AND',
+          field: String(item?.field ?? ''),
+          op: typeof item?.op === 'string' ? item.op : '=',
+          valueType: (['TEXT', 'NUMBER', 'VARIABLE', 'RAW'].includes(item?.valueType)
+            ? item.valueType
+            : 'TEXT') as FilterValueType,
+          value: String(item?.value ?? '')
         }))
       }
     } catch (e) {
@@ -2972,6 +3042,67 @@ defineExpose({ open })
   border-radius: 8px;
   padding: 10px 12px;
   margin: -8px 0 16px;
+}
+
+.var-box {
+  background: #fff;
+  border: 1px dashed #cfe3f7;
+  border-radius: 6px;
+  padding: 8px 10px 4px;
+  margin-bottom: 10px;
+}
+
+.var-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.var-title {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: #185fa5;
+}
+
+.var-hint {
+  flex: 1;
+  font-size: 12px;
+  color: #8c8c8c;
+  line-height: 1.7;
+}
+
+.var-hint code {
+  color: #185fa5;
+  background: #e6f1fb;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-family: Consolas, Monaco, monospace;
+}
+
+.var-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.var-eq {
+  flex: none;
+  line-height: 24px;
+  color: #bfbfbf;
+}
+
+.var-sql :deep(textarea) {
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+}
+
+.var-empty {
+  padding: 2px 2px 6px;
+  font-size: 12px;
+  color: #bfbfbf;
 }
 
 .filt-row {

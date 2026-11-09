@@ -27,6 +27,7 @@ import java.util.*;
 public class WebApiExtractor {
 
     private final EtlKingdeeCredentialService kingdeeCredentialService;
+    private final RequestVarResolver requestVarResolver;
 
     private static final List<String> BLOCKED_IP_PREFIXES = List.of(
             "10.", "172.16.", "172.17.", "172.18.", "172.19.",
@@ -66,10 +67,10 @@ public class WebApiExtractor {
 
         logBuffer.append(String.format("[WebAPI] 数据拉取地址: %s, 方式: %s\n", apiUrl, method));
 
-        // 日期变量在后端解析（${today-60d} 等），保证定时运行时始终取最新区间
-        String requestBody = DateVarResolver.resolve(pipeline.getApiBody());
+        // 变量在后端解析：内置 ${today}/${yesterday}/${now}，以及过滤条件里定义的 SQL 变量
+        String requestBody = requestVarResolver.resolve(pipeline, pipeline.getApiBody(), logBuffer);
         if (StrUtil.isNotBlank(requestBody) && !requestBody.equals(pipeline.getApiBody())) {
-            logBuffer.append(String.format("[WebAPI] 日期变量已解析，实际请求体: %s\n", StrUtil.brief(requestBody, 300)));
+            logBuffer.append(String.format("[WebAPI] 变量已替换，实际请求体: %s\n", StrUtil.brief(requestBody, 300)));
         }
 
         // 分页配置存在且启用时走分页循环，否则保持原有单次请求
