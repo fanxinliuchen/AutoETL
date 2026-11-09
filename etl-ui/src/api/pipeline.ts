@@ -48,3 +48,21 @@ export function testWebapiLogin(data: { authType: string; authConfig: string }):
 export function previewWebapiExtract(data: Partial<EtlPipeline>): Promise<{ total: number; records: any[]; log: string }> {
   return request.post('/etl/pipeline/webapi/preview', data)
 }
+
+export interface KingdeeFieldMeta {
+  key: string
+  label: string
+  type: string
+  rawType?: string
+}
+
+export function queryKingdeeFormFields(data: {
+  loginUrl: string
+  acctID?: string
+  userName?: string
+  password?: string
+  lcid?: number
+  formId: string
+}): Promise<KingdeeFieldMeta[]> {
+  return request.post('/etl/pipeline/webapi/form-fields', data)
+}

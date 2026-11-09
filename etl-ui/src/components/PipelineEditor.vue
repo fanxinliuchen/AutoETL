@@ -378,6 +378,16 @@
                               <a-button size="small" @click="handleDownloadTemplate">
                                 <file-add-outlined /> 模板
                               </a-button>
+                              <a-button
+                                size="small"
+                                :loading="kingdeeFieldsLoading"
+                                @click="handlePullKingdeeFields"
+                              >
+                                <api-outlined /> 从金蝶拉字段
+                              </a-button>
+                              <a-button size="small" @click="handleInferTypes">
+                                <bulb-outlined /> 推断类型
+                              </a-button>
                               <a-button size="small" @click="pasteModalVisible = true">
                                 粘贴导入
                               </a-button>
@@ -506,6 +516,76 @@
                         class="code-textarea"
                         :placeholder="pastePlaceholder"
                       />
+                    </a-modal>
+
+                    <a-modal
+                      v-model:open="kingdeeFieldModalVisible"
+                      title="从金蝶拉取字段"
+                      :footer="null"
+                      width="820px"
+                    >
+                      <div v-if="kingdeeFieldsLoading" class="kf-loading">
+                        <a-spin />
+                        <span>正在登录金蝶并读取表单元数据，请稍候…</span>
+                      </div>
+                      <a-alert
+                        v-else-if="kingdeeFieldError"
+                        type="error"
+                        show-icon
+                        :message="kingdeeFieldError"
+                      />
+                      <template v-else>
+                        <div class="kf-bar">
+                          <span class="fk-count">
+                            共 {{ kingdeeFields.length }} 个字段 · 已选 {{ kingdeeCheckedCount }}
+                          </span>
+                          <a-space :size="6">
+                            <a-button size="small" @click="toggleAllKingdeeFields(true)">全选</a-button>
+                            <a-button size="small" @click="toggleAllKingdeeFields(false)">清空</a-button>
+                          </a-space>
+                        </div>
+                        <a-table
+                          :columns="kingdeeColumns"
+                          :data-source="kingdeeFields"
+                          size="small"
+                          row-key="key"
+                          :pagination="false"
+                          :scroll="{ y: 380 }"
+                          bordered
+                        >
+                          <template #bodyCell="{ column, record }">
+                            <template v-if="column.dataIndex === 'checked'">
+                              <a-checkbox v-model:checked="record.checked" />
+                            </template>
+                            <template v-else-if="column.dataIndex === 'key'">
+                              <span class="fk-mono">{{ record.key }}</span>
+                            </template>
+                            <template v-else-if="column.dataIndex === 'rawType'">
+                              <span class="kf-raw">{{ record.rawType || '-' }}</span>
+                            </template>
+                            <template v-else-if="column.dataIndex === 'type'">
+                              <a-select
+                                v-model:value="record.type"
+                                size="small"
+                                :options="fieldTypeSelectOptions"
+                                style="width: 100%"
+                              />
+                            </template>
+                          </template>
+                        </a-table>
+                        <div class="kf-footer">
+                          <span class="fk-hint-inline">
+                            首次拉取会把「清单里还没有的字段」预勾选，已有字段保持不勾选，避免覆盖手工调整
+                          </span>
+                          <a-space>
+                            <a-button @click="kingdeeFieldModalVisible = false">取消</a-button>
+                            <a-button @click="applyKingdeeFields('append')">追加所选</a-button>
+                            <a-button type="primary" @click="applyKingdeeFields('replace')">
+                              覆盖为所选
+                            </a-button>
+                          </a-space>
+                        </div>
+                      </template>
                     </a-modal>
 
                     <a-row :gutter="16">
@@ -1099,7 +1179,9 @@ import {
   FileExcelOutlined,
   DownloadOutlined,
   FileAddOutlined,
-  PlusOutlined
+  PlusOutlined,
+  ApiOutlined,
+  BulbOutlined
 } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
 import SqlEditor from './SqlEditor.vue'
@@ -1108,7 +1190,9 @@ import {
   updatePipeline,
   saveStepPipeline,
   testWebapiLogin,
-  previewWebapiExtract
+  previewWebapiExtract,
+  queryKingdeeFormFields,
+  type KingdeeFieldMeta
 } from '../api/pipeline'
 import { getDatasourceList } from '../api/datasource'
 import { getAlertConfigList } from '../api/alert'
@@ -1126,6 +1210,7 @@ import {
   downloadFieldTemplate,
   fieldRowsToMetaJson,
   fieldRowsFromMeta,
+  inferFieldType,
   type FieldRow,
   type ParseResult
 } from '../utils/fieldKeysExcel'
@@ -1186,6 +1271,20 @@ const fileInputRef = ref<HTMLInputElement>()
 const pasteModalVisible = ref(false)
 const pasteText = ref('')
 const pastePlaceholder = 'FID\t单据内码\nFBillNo\t单据编号\nFSupplierId.FNumber\t供应商编码'
+
+// 从金蝶 QueryBusinessInfo 拉取的字段元数据
+const kingdeeFieldModalVisible = ref(false)
+const kingdeeFieldsLoading = ref(false)
+const kingdeeFieldError = ref('')
+const kingdeeFields = ref<Array<KingdeeFieldMeta & { checked: boolean }>>([])
+const kingdeeCheckedCount = computed(() => kingdeeFields.value.filter((f) => f.checked).length)
+const kingdeeColumns: any[] = [
+  { title: '', dataIndex: 'checked', width: 46, align: 'center' },
+  { title: '字段名', dataIndex: 'key' },
+  { title: '中文名', dataIndex: 'label', width: 170 },
+  { title: '金蝶类型', dataIndex: 'rawType', width: 130 },
+  { title: '临时表类型', dataIndex: 'type', width: 170 }
+]
 
 const fieldTypeSelectOptions = FIELD_TYPE_OPTIONS.map((t) => ({ label: t, value: t }))
 const fieldColumns: any[] = [
@@ -1412,6 +1511,107 @@ const handleExportExcel = () => {
 const handleDownloadTemplate = () => {
   downloadFieldTemplate()
   message.success('模板已下载')
+}
+
+// 从金蝶拉取表单字段（自动带出中文名与类型）
+const handlePullKingdeeFields = async () => {
+  if (!kingdeeQuery.value.formId) {
+    message.warning('请先填写业务对象表单标识 FormId')
+    return
+  }
+  if (!kingdeeConfig.value.loginUrl) {
+    message.warning('请先在上方填写金蝶登录接口地址')
+    return
+  }
+  kingdeeFields.value = []
+  kingdeeFieldError.value = ''
+  kingdeeFieldModalVisible.value = true
+  kingdeeFieldsLoading.value = true
+  try {
+    const list = await queryKingdeeFormFields({
+      loginUrl: kingdeeConfig.value.loginUrl,
+      acctID: kingdeeConfig.value.acctID,
+      userName: kingdeeConfig.value.userName,
+      password: kingdeeConfig.value.password,
+      lcid: kingdeeConfig.value.lcid,
+      formId: kingdeeQuery.value.formId
+    })
+    const existing = new Set(fieldRows.value.map((r) => r.fieldKey.trim().toUpperCase()))
+    kingdeeFields.value = (list || []).map((f) => ({
+      ...f,
+      type: f.type || inferFieldType(f.key),
+      checked: !existing.has((f.key || '').trim().toUpperCase())
+    }))
+    if (!kingdeeFields.value.length) {
+      kingdeeFieldError.value = '金蝶未返回任何字段，请确认 FormId 是否正确'
+    }
+  } catch (e: any) {
+    kingdeeFieldError.value = e?.message || '拉取字段失败，请检查登录配置'
+  } finally {
+    kingdeeFieldsLoading.value = false
+  }
+}
+
+const toggleAllKingdeeFields = (checked: boolean) => {
+  kingdeeFields.value.forEach((f) => {
+    f.checked = checked
+  })
+}
+
+// append: 只补清单里没有的字段；replace: 用所选字段整体替换清单
+const applyKingdeeFields = (mode: 'append' | 'replace') => {
+  const picked = kingdeeFields.value.filter((f) => f.checked && f.key)
+  if (!picked.length) {
+    message.warning('请至少勾选一个字段')
+    return
+  }
+  if (mode === 'replace') {
+    fieldRows.value = picked.map((f) =>
+      createRow({ fieldKey: f.key, label: f.label || '', type: f.type || 'TEXT', enabled: true })
+    )
+  } else {
+    const existing = new Set(fieldRows.value.map((r) => r.fieldKey.trim().toUpperCase()))
+    picked.forEach((f) => {
+      const upper = f.key.trim().toUpperCase()
+      if (existing.has(upper)) {
+        const row = fieldRows.value.find((r) => r.fieldKey.trim().toUpperCase() === upper)
+        if (row) {
+          if (!row.label) row.label = f.label || ''
+          if (!row.type || row.type === 'TEXT') row.type = f.type || row.type
+        }
+        return
+      }
+      fieldRows.value.push(
+        createRow({ fieldKey: f.key, label: f.label || '', type: f.type || 'TEXT', enabled: true })
+      )
+      existing.add(upper)
+    })
+  }
+  applyFieldRows()
+  kingdeeFieldModalVisible.value = false
+  message.success(`已${mode === 'replace' ? '覆盖' : '追加'} ${picked.length} 个字段`)
+}
+
+// 只填充还没有明确类型（空或 TEXT）的行，避免覆盖手工设置
+const handleInferTypes = () => {
+  if (!fieldRows.value.length) {
+    message.warning('请先添加字段')
+    return
+  }
+  let changed = 0
+  fieldRows.value.forEach((row) => {
+    if (!row.fieldKey.trim()) return
+    if (!row.type || row.type === 'TEXT') {
+      row.type = inferFieldType(row.fieldKey)
+      changed += 1
+    }
+  })
+  if (changed) {
+    applyFieldRows()
+    message.success(`已按字段名推断 ${changed} 个字段的类型，保存后生效`)
+  } else {
+    message.info('所有字段都已有明确类型，未做改动')
+  }
 }
 
 const confirmPasteImport = () => {
@@ -2020,5 +2220,47 @@ defineExpose({ open })
 
 .fk-input-mono :deep(input) {
   font-family: Consolas, Monaco, monospace;
+}
+
+.kf-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px 0;
+  font-size: 13px;
+  color: #8c8c8c;
+}
+
+.kf-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.kf-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.fk-hint-inline {
+  font-size: 12px;
+  color: #8c8c8c;
+  line-height: 1.5;
+  max-width: 420px;
+}
+
+.fk-mono {
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+}
+
+.kf-raw {
+  font-size: 12px;
+  color: #8c8c8c;
 }
 </style>

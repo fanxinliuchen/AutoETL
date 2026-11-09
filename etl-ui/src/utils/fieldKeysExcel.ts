@@ -143,8 +143,30 @@ export function downloadFieldTemplate() {
   XLSX.writeFile(wb, '抽取字段清单_模板.xlsx')
 }
 
-/** 字段行 -> field_meta JSON（随流程持久化，供后端解析临时表列类型） */
-export function fieldRowsToMetaJson(rows: FieldRow[]): string {
+/**
+ * 按字段名推断临时表类型（与后端 KingdeeMetadataClient.inferTypeByKey 保持同一口径）
+ * 用于元数据缺失时的兜底，以及「推断类型」批量填充
+ */
+export function inferFieldType(fieldKey: string): string {
+  const key = (fieldKey || '').toUpperCase()
+  if (!key) return 'TEXT'
+  const leaf = key.includes('.') ? key.slice(key.lastIndexOf('.') + 1) : key
+  if (leaf.endsWith('ID') || leaf === 'FID') return 'BIGINT'
+  if (leaf.includes('DATETIME') || (leaf.includes('TIME') && !leaf.includes('DATE'))) return 'DATETIME'
+  if (leaf.includes('DATE')) return 'DATE'
+  if (
+    ['AMOUNT', 'PRICE', 'QTY', 'RATE', 'TAX', 'COST', 'WEIGHT', 'VOLUME', 'BALANCE'].some((t) =>
+      leaf.includes(t)
+    )
+  ) {
+    return 'DECIMAL(18,4)'
+  }
+  if (leaf.includes('COUNT') || leaf.includes('SEQ')) return 'INT'
+  if (leaf.includes('STATUS') || leaf.includes('FLAG') || leaf.includes('ENABLE')) return 'VARCHAR(32)'
+  return 'VARCHAR(255)'
+}
+
+/** 字段行 -> field_meta JSON（随流程持久化，供后端解析临时表列类型） */export function fieldRowsToMetaJson(rows: FieldRow[]): string {
   return JSON.stringify({
     fields: rows.map((r) => ({
       k: r.fieldKey.trim(),

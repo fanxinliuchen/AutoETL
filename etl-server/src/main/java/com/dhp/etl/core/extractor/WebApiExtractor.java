@@ -268,7 +268,7 @@ public class WebApiExtractor {
         return null;
     }
 
-    private void validateUrlSafety(String url) {
+    public void validateUrlSafety(String url) {
         try {
             URI uri = new URI(url);
             String host = uri.getHost();

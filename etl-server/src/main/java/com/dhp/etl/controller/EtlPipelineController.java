@@ -3,8 +3,10 @@ package com.dhp.etl.controller;
 import com.dhp.common.base.BaseCrudController;
 import com.dhp.common.base.IBaseCrudService;
 import com.dhp.common.result.R;
+import com.dhp.etl.core.extractor.KingdeeMetadataClient;
 import com.dhp.etl.core.extractor.WebApiExtractor;
 import com.dhp.etl.core.guard.SqlSafetyGuard;
+import com.dhp.etl.dto.KingdeeFormFieldQueryDTO;
 import com.dhp.etl.dto.SqlValidateDTO;
 import com.dhp.etl.entity.EtlPipeline;
 import com.dhp.etl.service.EtlPipelineService;
@@ -28,6 +30,7 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
     private final EtlPipelineService pipelineService;
     private final SqlSafetyGuard sqlSafetyGuard;
     private final WebApiExtractor webApiExtractor;
+    private final KingdeeMetadataClient kingdeeMetadataClient;
 
     @Override
     protected IBaseCrudService<EtlPipeline> getService() {
@@ -100,6 +103,13 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
         Map<String, Object> result = webApiExtractor.executePreAuth(authType, authConfig, logBuffer);
         result.put("log", logBuffer.toString());
         return R.ok(result);
+    }
+
+    @Operation(summary = "拉取金蝶表单字段元数据（字段标识/中文名/类型）")
+    @PostMapping("/webapi/form-fields")
+    public R<List<Map<String, Object>>> queryKingdeeFormFields(
+            @RequestBody @Valid KingdeeFormFieldQueryDTO dto) {
+        return R.ok(kingdeeMetadataClient.queryFormFields(dto));
     }
 
     @Operation(summary = "WebAPI 抽取测试与数据预览")

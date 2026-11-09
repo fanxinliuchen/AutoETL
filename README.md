@@ -197,6 +197,8 @@ pnpm dev
     * 导入按表头名称识别列，列顺序可随意调整；字段名含空格、逗号、中文会直接报错并定位到行号，重复字段自动去重。
     * **行序即 FieldKeys 序，也是临时表列序**：抽取结果按 FieldKeys 下标对齐金蝶返回的二维数组，调整顺序会改变列序。
     * 「启用=否」的行不进入 FieldKeys，但保留在清单中，可随时恢复。
+    * **从金蝶拉字段**：登录 K3Cloud 后调用 `DynamicFormService.QueryBusinessInfo`，自动带出表单全部字段的标识、中文名与数据类型，勾选后「追加」或「覆盖」到清单。首次拉取只预勾选清单里还没有的字段，避免覆盖手工调整。
+    * **推断类型**：按字段名规则推断（`FID`/`*Id`→`BIGINT`、`*Date`→`DATE`、`*Time`→`DATETIME`、`*Amount`/`*Qty`/`*Price`→`DECIMAL(18,4)`…），只填充仍为 `TEXT` 的行。
     * 「中文名」「类型」随流程保存在 `t_etl_pipeline.field_meta`（JSON）。**类型会用于创建 Staging 临时表列**（如 `DECIMAL(18,4)`、`DATETIME`），未指定的列仍为 `TEXT`；类型白名单之外的取值一律降级为 `TEXT`。改动类型后，下次运行会自动比对并重建临时表。
 
 ### 2. SQL 转换与动态变量 (Transform)
