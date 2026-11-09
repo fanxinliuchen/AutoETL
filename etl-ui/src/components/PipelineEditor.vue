@@ -655,7 +655,17 @@
 
                     <!-- 高级配置：分页取数 -->
                     <a-collapse v-model:activeKey="advancedActiveKeys" :bordered="false" class="adv-collapse">
-                      <a-collapse-panel key="pagination" header="高级配置：分页取数（数据量大时按偏移量翻页）">
+                      <a-collapse-panel key="pagination">
+                        <template #header>
+                          <span class="adv-title">高级配置 · 分页取数</span>
+                          <a-tag
+                            :color="pagination.enabled ? 'green' : 'default'"
+                            class="adv-tag"
+                          >
+                            {{ pagination.enabled ? '已开启' : '未开启' }}
+                          </a-tag>
+                          <span class="adv-sub">数据量大时按偏移量翻页</span>
+                        </template>
                         <a-row :gutter="16">
                           <a-col :span="6">
                             <a-form-item label="分页取数">
@@ -1428,7 +1438,8 @@ const defaultPagination = () => ({
 })
 
 const pagination = ref(defaultPagination())
-const advancedActiveKeys = ref<string[]>([])
+// 默认展开，避免被当成一条不起眼的折叠项
+const advancedActiveKeys = ref<string[]>(['pagination'])
 
 // api_pagination 在库里是 MySQL JSON 列，空字符串会被判为非法 JSON，关闭时写 {} 而不是 ''
 const syncPagination = () => {
@@ -1443,9 +1454,7 @@ const loadPagination = () => {
     try {
       const parsed = JSON.parse(formData.value.apiPagination)
       pagination.value = { ...pagination.value, ...parsed }
-      if (pagination.value.enabled) {
-        advancedActiveKeys.value = ['pagination']
-      }
+      advancedActiveKeys.value = ['pagination']
     } catch (e) {
       pagination.value = defaultPagination()
     }
@@ -2164,7 +2173,7 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     }
     kingdeeQuery.value = defaultKingdeeQuery()
     pagination.value = defaultPagination()
-    advancedActiveKeys.value = []
+    advancedActiveKeys.value = ['pagination']
     syncKingdeeLoginBody()
     syncKingdeeQueryToBody()
     rebuildFieldRows()
@@ -2182,7 +2191,7 @@ const handleReset = () => {
     formData.value = initialFormData()
     kingdeeQuery.value = defaultKingdeeQuery()
     pagination.value = defaultPagination()
-    advancedActiveKeys.value = []
+    advancedActiveKeys.value = ['pagination']
     syncKingdeeLoginBody()
     syncKingdeeQueryToBody()
     rebuildFieldRows()
@@ -2574,6 +2583,42 @@ defineExpose({ open })
 }
 
 .kf-raw {
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.adv-collapse {
+  background: #fafafa;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  margin-top: 4px;
+  margin-bottom: 24px;
+  overflow: hidden;
+}
+
+.adv-collapse :deep(.ant-collapse-header) {
+  padding: 10px 14px !important;
+  align-items: center !important;
+}
+
+.adv-collapse :deep(.ant-collapse-content-box) {
+  padding: 4px 14px 8px !important;
+  background: #fff;
+}
+
+.adv-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #262626;
+}
+
+.adv-tag {
+  margin-left: 8px;
+  margin-right: 0;
+}
+
+.adv-sub {
+  margin-left: 8px;
   font-size: 12px;
   color: #8c8c8c;
 }
