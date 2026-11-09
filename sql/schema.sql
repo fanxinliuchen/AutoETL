@@ -171,7 +171,32 @@ CREATE TABLE t_etl_alert_config (
     PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='ETL告警配置表';
 
--- 6. 初始化示例演示数据
+-- 6. 金蝶登录凭证表 (密码 AES 加密存储，接口不回显)
+DROP TABLE IF EXISTS t_etl_kingdee_credential;
+CREATE TABLE t_etl_kingdee_credential (
+    id               BIGINT       NOT NULL COMMENT '主键ID',
+    cred_name        VARCHAR(64)  NULL     DEFAULT '默认凭证' COMMENT '凭证名称',
+    login_url        VARCHAR(512) NOT NULL COMMENT '金蝶登录接口地址',
+    acct_id          VARCHAR(64)  NULL     COMMENT '数据中心/账套代码 acctID',
+    user_name        VARCHAR(64)  NULL     COMMENT '登录用户名',
+    password_cipher  VARCHAR(512) NOT NULL COMMENT '加密密码(AES)',
+    lcid             INT          NOT NULL DEFAULT 2052 COMMENT '多语言环境代码',
+    is_default       TINYINT      NOT NULL DEFAULT 1 COMMENT '是否默认凭证: 1=是',
+    status           TINYINT      NOT NULL DEFAULT 1 COMMENT '状态: 1=正常, 0=禁用',
+    create_user_id   BIGINT       NULL,
+    create_user_name VARCHAR(64)  NULL,
+    create_time      DATETIME     NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user_id   BIGINT       NULL,
+    update_user_name VARCHAR(64)  NULL,
+    update_time      DATETIME     NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    object_status_cd INT          NOT NULL DEFAULT 0,
+    object_version   INT          NOT NULL DEFAULT 1,
+    tenant_id        VARCHAR(32)  NULL,
+    PRIMARY KEY (id),
+    KEY idx_default (is_default)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='金蝶登录凭证表';
+
+-- 7. 初始化示例演示数据
 INSERT INTO t_etl_folder (id, parent_id, folder_name, folder_sort) VALUES
 (1001, 0, 'ERP系统对接', 1),
 (1002, 0, 'CRM客户中心', 2),

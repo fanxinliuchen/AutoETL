@@ -8,7 +8,9 @@ import cn.hutool.json.JSONUtil;
 import com.dhp.common.exception.BizException;
 import com.dhp.common.result.ErrorCode;
 import com.dhp.etl.entity.EtlPipeline;
+import com.dhp.etl.service.EtlKingdeeCredentialService;
 import com.jayway.jsonpath.JsonPath;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -21,7 +23,10 @@ import java.util.*;
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class WebApiExtractor {
+
+    private final EtlKingdeeCredentialService kingdeeCredentialService;
 
     private static final List<String> BLOCKED_IP_PREFIXES = List.of(
             "10.", "172.16.", "172.17.", "172.18.", "172.19.",
@@ -142,10 +147,29 @@ public class WebApiExtractor {
 
             // 金蝶云星空模式: 若未传原始 body，则根据参数自动组装金蝶标准登录体
             if ("KINGDEE_K3".equalsIgnoreCase(authType) && StrUtil.isBlank(loginBody) && authConfig.containsKey("acctID")) {
+                String acctID = authConfig.getStr("acctID");
+                String userName = authConfig.getStr("userName");
+                String password = authConfig.getStr("password");
+
+                // 密码留空时沿用已保存的默认凭证，免去每次手填；账套或用户名不匹配则不兜底
+                if (StrUtil.isBlank(password)) {
+                    String savedPassword = kingdeeCredentialService.resolvePassword(acctID, userName);
+                    if (StrUtil.isNotBlank(savedPassword)) {
+                        password = savedPassword;
+                        if (logBuffer != null) {
+                            logBuffer.append("[WebAPI-Auth] 已使用保存的金蝶登录凭证（密码不回显）\n");
+                        }
+                    }
+                }
+                if (StrUtil.isBlank(password)) {
+                    throw new BizException(ErrorCode.PARAM_ERROR,
+                            "登录密码为空，且未找到与之匹配的已保存凭证（账套或用户名不一致）");
+                }
+
                 JSONObject kingdeeBody = new JSONObject();
-                kingdeeBody.set("acctID", authConfig.getStr("acctID"));
-                kingdeeBody.set("userName", authConfig.getStr("userName"));
-                kingdeeBody.set("password", authConfig.getStr("password"));
+                kingdeeBody.set("acctID", acctID);
+                kingdeeBody.set("userName", userName);
+                kingdeeBody.set("password", password);
                 kingdeeBody.set("lcid", authConfig.getInt("lcid", 2052));
                 loginBody = kingdeeBody.toString();
             }

@@ -66,3 +66,26 @@ export function queryKingdeeFormFields(data: {
 }): Promise<KingdeeFieldMeta[]> {
   return request.post('/etl/pipeline/webapi/form-fields', data)
 }
+
+export interface KingdeeCredentialMasked {
+  loginUrl?: string
+  acctID?: string
+  userName?: string
+  lcid?: number
+  hasPassword?: boolean
+  updateTime?: string
+}
+
+export function saveKingdeeCredential(data: {
+  loginUrl: string
+  acctID?: string
+  userName?: string
+  password?: string
+  lcid?: number
+}): Promise<KingdeeCredentialMasked> {
+  return request.post('/etl/kingdee-credential/save', data)
+}
+
+export function getKingdeeCredentialDefault(): Promise<KingdeeCredentialMasked | null> {
+  return request.get('/etl/kingdee-credential/default')
+}

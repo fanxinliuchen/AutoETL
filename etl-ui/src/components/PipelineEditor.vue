@@ -202,8 +202,21 @@
                   >
                     <template #extra>
                       <a-space>
-                        <a-button size="small" type="link" @click="loadKingdeeAuthTemplate">
-                          ✨ 载入金蝶星空标准登录地址
+                        <a-button
+                          size="small"
+                          type="link"
+                          :loading="savingCredential"
+                          @click="handleSaveCredential"
+                        >
+                          💾 保存我的凭证
+                        </a-button>
+                        <a-button
+                          size="small"
+                          type="link"
+                          :loading="loadingCredential"
+                          @click="handleLoadCredential"
+                        >
+                          📥 载入默认凭证
                         </a-button>
                         <a-button
                           type="primary"
@@ -252,9 +265,14 @@
                         <a-form-item label="登录密码 (password)" required>
                           <a-input-password
                             v-model:value="kingdeeConfig.password"
-                            placeholder="请输入登录密码"
+                            :placeholder="
+                              hasSavedPassword ? '已保存，留空即使用已保存的密码' : '请输入登录密码'
+                            "
                             @change="syncKingdeeLoginBody"
                           />
+                          <div v-if="hasSavedPassword" class="fk-hint">
+                            密码已加密保存，界面上永不回显；留空时后端自动使用已保存密码
+                          </div>
                         </a-form-item>
                       </a-col>
                       <a-col :span="6">
@@ -1192,7 +1210,10 @@ import {
   testWebapiLogin,
   previewWebapiExtract,
   queryKingdeeFormFields,
-  type KingdeeFieldMeta
+  saveKingdeeCredential,
+  getKingdeeCredentialDefault,
+  type KingdeeFieldMeta,
+  type KingdeeCredentialMasked
 } from '../api/pipeline'
 import { getDatasourceList } from '../api/datasource'
 import { getAlertConfigList } from '../api/alert'
@@ -1308,6 +1329,11 @@ const customAuthConfig = ref({
   loginBody: '{\n  "username": "admin",\n  "password": ""\n}',
   extractPath: '$.token'
 })
+
+// 金蝶客户端
+const savingCredential = ref(false)
+const loadingCredential = ref(false)
+const hasSavedPassword = ref(false)
 
 // 测试登录状态
 const testingLogin = ref(false)
@@ -1650,6 +1676,85 @@ const loadKingdeeAuthTemplate = () => {
   message.success('已载入金蝶云星空标准登录接口格式')
 }
 
+// 把已保存的凭证套用到表单（密码永不回显）
+const applyCredentialToForm = (credential: KingdeeCredentialMasked) => {
+  kingdeeConfig.value = {
+    loginUrl: credential.loginUrl || kingdeeConfig.value.loginUrl,
+    acctID: credential.acctID || '',
+    userName: credential.userName || '',
+    password: '',
+    lcid: credential.lcid || 2052
+  }
+  hasSavedPassword.value = !!credential.hasPassword
+  syncKingdeeLoginBody()
+}
+
+// 保存当前表单中的凭证（密码加密落库；留空表示沿用旧密码）
+const handleSaveCredential = async () => {
+  if (!kingdeeConfig.value.loginUrl?.trim()) {
+    message.warning('请先填写金蝶登录接口地址')
+    return
+  }
+  if (!kingdeeConfig.value.acctID?.trim()) {
+    message.warning('请先填写数据中心 / 账套代码 acctID')
+    return
+  }
+  if (!kingdeeConfig.value.userName?.trim()) {
+    message.warning('请先填写登录用户名')
+    return
+  }
+  if (!kingdeeConfig.value.password && !hasSavedPassword.value) {
+    message.warning('首次保存必须填写登录密码')
+    return
+  }
+  savingCredential.value = true
+  try {
+    const saved = await saveKingdeeCredential({
+      loginUrl: kingdeeConfig.value.loginUrl.trim(),
+      acctID: kingdeeConfig.value.acctID?.trim(),
+      userName: kingdeeConfig.value.userName?.trim(),
+      password: kingdeeConfig.value.password || undefined,
+      lcid: kingdeeConfig.value.lcid
+    })
+    hasSavedPassword.value = !!saved?.hasPassword
+    // 保存后立即清空表单里的明文密码，并同步到 apiAuthConfig
+    kingdeeConfig.value.password = ''
+    syncKingdeeLoginBody()
+    message.success('凭证已加密保存，之后无需再手填密码')
+  } finally {
+    savingCredential.value = false
+  }
+}
+
+// 载入默认凭证；没有保存过则回落为标准登录地址模板
+const handleLoadCredential = async () => {
+  loadingCredential.value = true
+  try {
+    const credential = await getKingdeeCredentialDefault()
+    if (!credential) {
+      loadKingdeeAuthTemplate()
+      message.info('尚未保存凭证，已载入金蝶标准登录地址模板')
+      return
+    }
+    applyCredentialToForm(credential)
+    message.success('已载入保存的凭证（密码不回显，留空即使用已保存密码）')
+  } finally {
+    loadingCredential.value = false
+  }
+}
+
+// 打开页面时静默套用已保存凭证，省去每次手填
+const loadCredentialSilently = async () => {
+  try {
+    const credential = await getKingdeeCredentialDefault()
+    if (credential) {
+      applyCredentialToForm(credential)
+    }
+  } catch (e) {
+    // 静默失败：不影响正常编辑
+  }
+}
+
 // 载入金蝶常用单据模板
 const loadKingdeeBillTemplate = (billType: string) => {
   if (billType === 'PUR_PurchaseOrder') {
@@ -1838,6 +1943,9 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
           customAuthConfig.value = { ...customAuthConfig.value, ...parsedAuth }
         }
       } catch (e) {}
+    } else {
+      // 老流程没存过鉴权配置时，套用已保存凭证，避免重复手填
+      await loadCredentialSilently()
     }
 
     if (record.apiBody) {
@@ -1860,6 +1968,8 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     syncKingdeeLoginBody()
     syncKingdeeQueryToBody()
     rebuildFieldRows()
+    // 新建流程时自动套用已保存凭证，省去每次手填
+    await loadCredentialSilently()
   }
 }
 

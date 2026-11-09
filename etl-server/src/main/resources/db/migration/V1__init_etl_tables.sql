@@ -139,3 +139,27 @@ CREATE TABLE IF NOT EXISTS t_etl_alert_config (
     tenant_id        VARCHAR(32)  NULL,
     PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='ETL告警配置表';
+
+-- 6. 金蝶登录凭证表 (密码 AES 加密存储，接口不回显)
+CREATE TABLE IF NOT EXISTS t_etl_kingdee_credential (
+    id               BIGINT       NOT NULL,
+    cred_name        VARCHAR(64)  NULL     DEFAULT '默认凭证',
+    login_url        VARCHAR(512) NOT NULL,
+    acct_id          VARCHAR(64)  NULL,
+    user_name        VARCHAR(64)  NULL,
+    password_cipher  VARCHAR(512) NOT NULL,
+    lcid             INT          NOT NULL DEFAULT 2052,
+    is_default       TINYINT      NOT NULL DEFAULT 1,
+    status           TINYINT      NOT NULL DEFAULT 1,
+    create_user_id   BIGINT       NULL,
+    create_user_name VARCHAR(64)  NULL,
+    create_time      DATETIME     NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user_id   BIGINT       NULL,
+    update_user_name VARCHAR(64)  NULL,
+    update_time      DATETIME     NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    object_status_cd INT          NOT NULL DEFAULT 0,
+    object_version   INT          NOT NULL DEFAULT 1,
+    tenant_id        VARCHAR(32)  NULL,
+    PRIMARY KEY (id),
+    KEY idx_default (is_default)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='金蝶登录凭证表';
