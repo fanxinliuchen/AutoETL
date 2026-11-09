@@ -38,6 +38,7 @@ public class EtlPipelineServiceImpl extends BaseCrudServiceImpl<EtlPipelineMappe
 
     @Override
     public boolean savePipeline(EtlPipeline pipeline) {
+        normalizeJsonColumns(pipeline);
         // 1. 业务编码自动生成 (若未指定则自动生成唯一标识)
         if (StrUtil.isBlank(pipeline.getPipelineCode())) {
             pipeline.setPipelineCode(generatePipelineCode());
@@ -60,6 +61,7 @@ public class EtlPipelineServiceImpl extends BaseCrudServiceImpl<EtlPipelineMappe
 
     @Override
     public boolean updatePipeline(EtlPipeline pipeline) {
+        normalizeJsonColumns(pipeline);
         // 1. 业务编码与版本号同步
         EtlPipeline old = this.getById(pipeline.getId());
         if (old != null) {
@@ -145,6 +147,23 @@ public class EtlPipelineServiceImpl extends BaseCrudServiceImpl<EtlPipelineMappe
         }
         if (this.count(wrapper) > 0) {
             throw new BizException(ErrorCode.ETL_PIPELINE_CODE_DUPLICATE, "流程编码 [" + code + "] 已存在");
+        }
+    }
+
+    /**
+     * api_headers / api_pagination 在库里是 MySQL JSON 列。
+     * 前端清空输入时可能传入空字符串，MySQL 会报
+     * "Invalid JSON text: The document is empty"，这里统一收敛为 {}。
+     */
+    private void normalizeJsonColumns(EtlPipeline pipeline) {
+        if (pipeline == null) {
+            return;
+        }
+        if (pipeline.getApiPagination() != null && StrUtil.isBlank(pipeline.getApiPagination())) {
+            pipeline.setApiPagination("{}");
+        }
+        if (pipeline.getApiHeaders() != null && StrUtil.isBlank(pipeline.getApiHeaders())) {
+            pipeline.setApiHeaders("{}");
         }
     }
 

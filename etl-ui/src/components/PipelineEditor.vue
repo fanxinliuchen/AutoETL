@@ -1430,11 +1430,11 @@ const defaultPagination = () => ({
 const pagination = ref(defaultPagination())
 const advancedActiveKeys = ref<string[]>([])
 
-// 未启用时写空串，后端据此走单次请求
+// api_pagination 在库里是 MySQL JSON 列，空字符串会被判为非法 JSON，关闭时写 {} 而不是 ''
 const syncPagination = () => {
-  formData.value.apiPagination = pagination.value.enabled
-    ? JSON.stringify(pagination.value)
-    : ''
+  formData.value.apiPagination = JSON.stringify(
+    pagination.value.enabled ? pagination.value : {}
+  )
 }
 
 const loadPagination = () => {
