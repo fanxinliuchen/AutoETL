@@ -671,24 +671,19 @@
                             <a-select
                               v-model:value="row.dateBase"
                               size="small"
-                              style="width: 132px; flex: none"
-                              :options="DATE_BASES"
+                              style="width: 88px; flex: none"
+                              :options="[
+                                { label: '今天', value: 'today' },
+                                { label: '昨天', value: 'yesterday' },
+                                { label: '此刻', value: 'now' }
+                              ]"
                               @change="applyFilterConditions"
                             />
                             <a-input-number
                               v-model:value="row.dateOffset"
                               size="small"
-                              style="width: 120px; flex: none"
-                              @change="applyFilterConditions"
-                            />
-                            <a-select
-                              v-model:value="row.dateUnit"
-                              size="small"
-                              style="width: 66px; flex: none"
-                              :options="[
-                                { label: '天', value: 'd' },
-                                { label: '周', value: 'w' }
-                              ]"
+                              style="width: 110px; flex: none"
+                              addon-after="天"
                               @change="applyFilterConditions"
                             />
                           </template>
@@ -721,25 +716,8 @@
                       <div v-if="!filterConditions.length" class="filt-empty">
                         尚未添加条件，点击右上角「+ 添加条件」
                       </div>
-                      <div class="filt-foot">
-                        <div class="filt-week">
-                          <span>会计周起始日</span>
-                          <a-select
-                            v-model:value="weekStartDay"
-                            size="small"
-                            style="width: 138px"
-                            :options="WEEK_START_OPTIONS"
-                            @change="applyFilterConditions"
-                          />
-                          <a-tooltip
-                            title="会计周从该日起连续 7 天；用于「本周会计周开始/结束」变量，执行时按当天动态计算"
-                          >
-                            <span class="filt-week-tip">?</span>
-                          </a-tooltip>
-                        </div>
-                        <div class="filt-preview">
-                          生成：<code>{{ kingdeeQuery.filterString || '（空）' }}</code>
-                        </div>
+                      <div class="filt-preview">
+                        生成：<code>{{ kingdeeQuery.filterString || '（空）' }}</code>
                       </div>
                       <datalist id="filter-field-list">
                         <option v-for="opt in filterFieldOptions" :key="opt.value" :value="opt.value" />
@@ -1576,7 +1554,6 @@ const onPaginationToggle = () => {
 
 // ===== 过滤条件：多字段 · 每字段多条件 =====
 type FilterValueType = 'TEXT' | 'NUMBER' | 'DATE' | 'RAW'
-type DateBase = 'today' | 'yesterday' | 'now' | 'acctWeekStart' | 'acctWeekEnd'
 
 interface FilterCondition {
   rid: string
@@ -1585,35 +1562,9 @@ interface FilterCondition {
   op: string
   valueType: FilterValueType
   value: string
-  dateBase: DateBase
+  dateBase: 'today' | 'yesterday' | 'now'
   dateOffset: number
-  dateUnit: 'd' | 'w'
 }
-
-// 日期变量基准：会计周 = 从「会计周起始日」（默认周五）起算的 7 天
-const DATE_BASES: { label: string; value: DateBase }[] = [
-  { label: '今天', value: 'today' },
-  { label: '昨天', value: 'yesterday' },
-  { label: '此刻', value: 'now' },
-  { label: '本周会计周开始', value: 'acctWeekStart' },
-  { label: '本周会计周结束', value: 'acctWeekEnd' }
-]
-
-// 「上个会计周」等简写在解析回填时还原成 起始日 -1 周
-const DATE_BASE_ALIAS: Record<string, { base: DateBase; offset: number; unit: 'd' | 'w' }> = {
-  lastacctweekstart: { base: 'acctWeekStart', offset: -1, unit: 'w' },
-  lastacctweekend: { base: 'acctWeekEnd', offset: -1, unit: 'w' }
-}
-
-const WEEK_START_OPTIONS = [
-  { label: '周五（会计周）', value: 'FRIDAY' },
-  { label: '周一', value: 'MONDAY' },
-  { label: '周六', value: 'SATURDAY' },
-  { label: '周日', value: 'SUNDAY' }
-]
-
-// 会计周起始日随流程保存（filter_meta.weekStart），后端执行时据此解析
-const weekStartDay = ref('FRIDAY')
 
 const FILTER_OPS = [
   '=',
@@ -1648,8 +1599,7 @@ const defaultFilterCondition = (): FilterCondition => {
     valueType: 'TEXT',
     value: '',
     dateBase: 'today',
-    dateOffset: 0,
-    dateUnit: 'd'
+    dateOffset: 0
   }
 }
 
@@ -1659,15 +1609,14 @@ const filterMode = ref<'table' | 'text'>('table')
 
 const needsFilterValue = (op: string) => op !== 'IS NULL' && op !== 'IS NOT NULL'
 
-// 日期变量写法：${today}、${today-60d}、${acctWeekStart-1w}
+// 日期变量写法：${today}、${today-60d}、${yesterday-1m}
 const buildDateVar = (row: FilterCondition) => {
   const offset = row.dateOffset || 0
-  const unit = row.dateUnit || 'd'
   if (offset === 0) {
     return `\${${row.dateBase}}`
   }
   const sign = offset > 0 ? '+' : '-'
-  return `\${${row.dateBase}${sign}${Math.abs(offset)}${unit}}`
+  return `\${${row.dateBase}${sign}${Math.abs(offset)}d}`
 }
 
 const quoteText = (text: string) => `'${text.replace(/'/g, "''")}'`
@@ -1714,7 +1663,6 @@ const applyFilterConditions = () => {
   kingdeeQuery.value.filterString = buildFilterString()
   formData.value.filterMeta = JSON.stringify({
     mode: filterMode.value,
-    weekStart: weekStartDay.value,
     conditions: filterConditions.value
   })
   syncKingdeeQueryToBody()
@@ -1767,21 +1715,11 @@ const parseFilterString = (raw: string): FilterCondition[] | null => {
     }
     if (/^'.*'$/.test(rawValue)) {
       const inner = rawValue.slice(1, -1).replace(/''/g, "'")
-      const dateMatch = inner.match(
-        /^\$\{(today|yesterday|now|acctWeekStart|acctWeekEnd|lastAcctWeekStart|lastAcctWeekEnd)([+-]\d+)?([dmyw])?\}$/i
-      )
+      const dateMatch = inner.match(/^\$\{(today|yesterday|now)([+-]\d+)?d?\}$/i)
       if (dateMatch) {
         row.valueType = 'DATE'
-        const alias = DATE_BASE_ALIAS[dateMatch[1].toLowerCase()]
-        if (alias) {
-          row.dateBase = alias.base
-          row.dateOffset = alias.offset
-          row.dateUnit = alias.unit
-        } else {
-          row.dateBase = dateMatch[1].toLowerCase() as DateBase
-          row.dateOffset = dateMatch[2] ? Number(dateMatch[2]) : 0
-          row.dateUnit = (dateMatch[3]?.toLowerCase() as 'd' | 'w') || 'd'
-        }
+        row.dateBase = dateMatch[1].toLowerCase() as 'today' | 'yesterday' | 'now'
+        row.dateOffset = dateMatch[2] ? Number(dateMatch[2]) : 0
       } else {
         row.valueType = 'TEXT'
         row.value = inner
@@ -1803,15 +1741,11 @@ const loadFilter = (preserveMode = false) => {
     filterMode.value = 'table'
   }
   let conditions: FilterCondition[] | null = null
-  weekStartDay.value = 'FRIDAY'
   if (formData.value.filterMeta) {
     try {
       const parsed = JSON.parse(formData.value.filterMeta)
       if (parsed?.mode === 'text') {
         filterMode.value = 'text'
-      }
-      if (parsed?.weekStart) {
-        weekStartDay.value = String(parsed.weekStart)
       }
       if (Array.isArray(parsed?.conditions)) {
         conditions = parsed.conditions.map((item: any) => ({
@@ -3062,41 +2996,10 @@ defineExpose({ open })
   padding: 6px 2px;
 }
 
-.filt-foot {
+.filt-preview {
   margin-top: 6px;
   padding-top: 8px;
   border-top: 1px dashed #e8e8e8;
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  flex-wrap: wrap;
-}
-
-.filt-week {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  font-size: 12px;
-  color: #8c8c8c;
-}
-
-.filt-week-tip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 1px solid #d9d9d9;
-  font-size: 11px;
-  color: #bfbfbf;
-  cursor: help;
-}
-
-.filt-preview {
-  flex: 1;
-  min-width: 240px;
   font-size: 12px;
   color: #8c8c8c;
   word-break: break-all;

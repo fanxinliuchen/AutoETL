@@ -36,21 +36,6 @@ public class WebApiExtractor {
     );
 
     /**
-     * 读取流程里配置的会计周起始日（filter_meta.weekStart），缺省为周五
-     */
-    private String readWeekStart(EtlPipeline pipeline) {
-        if (StrUtil.isBlank(pipeline.getFilterMeta())) {
-            return DateVarResolver.DEFAULT_WEEK_START.name();
-        }
-        try {
-            String value = JSONUtil.parseObj(pipeline.getFilterMeta()).getStr("weekStart");
-            return DateVarResolver.parseWeekStart(value).name();
-        } catch (Exception e) {
-            return DateVarResolver.DEFAULT_WEEK_START.name();
-        }
-    }
-
-    /**
      * 抽取 WebAPI 结果数据
      */
     public List<Map<String, Object>> extract(EtlPipeline pipeline, StringBuilder logBuffer) {
@@ -81,14 +66,9 @@ public class WebApiExtractor {
 
         logBuffer.append(String.format("[WebAPI] 数据拉取地址: %s, 方式: %s\n", apiUrl, method));
 
-        // 日期变量在后端解析（${today-60d}、${acctWeekStart-1w} 等），保证定时运行时始终取最新区间；
-        // 会计周起始日随流程配置走（filter_meta.weekStart），默认周五
-        String weekStart = readWeekStart(pipeline);
-        String requestBody = DateVarResolver.resolve(pipeline.getApiBody(), weekStart);
+        // 日期变量在后端解析（${today-60d} 等），保证定时运行时始终取最新区间
+        String requestBody = DateVarResolver.resolve(pipeline.getApiBody());
         if (StrUtil.isNotBlank(requestBody) && !requestBody.equals(pipeline.getApiBody())) {
-            if (pipeline.getApiBody().contains("acctWeek") || pipeline.getApiBody().contains("AcctWeek")) {
-                logBuffer.append(String.format("[WebAPI] 会计周起始日: %s\n", weekStart));
-            }
             logBuffer.append(String.format("[WebAPI] 日期变量已解析，实际请求体: %s\n", StrUtil.brief(requestBody, 300)));
         }
 
