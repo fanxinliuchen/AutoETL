@@ -653,6 +653,137 @@
                       </a-col>
                     </a-row>
 
+                    <!-- 高级配置：分页取数 -->
+                    <a-collapse v-model:activeKey="advancedActiveKeys" :bordered="false" class="adv-collapse">
+                      <a-collapse-panel key="pagination" header="高级配置：分页取数（数据量大时按偏移量翻页）">
+                        <a-row :gutter="16">
+                          <a-col :span="6">
+                            <a-form-item label="分页取数">
+                              <a-switch
+                                v-model:checked="pagination.enabled"
+                                checked-children="已开启"
+                                un-checked-children="未开启"
+                                @change="syncPagination"
+                              />
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="6">
+                            <a-form-item label="每页条数 (limit)">
+                              <a-input-number
+                                v-model:value="pagination.pageSize"
+                                :min="1"
+                                :max="10000"
+                                :disabled="!pagination.enabled"
+                                style="width: 100%"
+                                @change="syncPagination"
+                              />
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="6">
+                            <a-form-item label="最多取数次数">
+                              <a-input-number
+                                v-model:value="pagination.maxPages"
+                                :min="1"
+                                :max="10000"
+                                :disabled="!pagination.enabled"
+                                style="width: 100%"
+                                @change="syncPagination"
+                              />
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="6">
+                            <a-form-item label="请求间隔 (ms，限速)">
+                              <a-input-number
+                                v-model:value="pagination.intervalMs"
+                                :min="0"
+                                :max="60000"
+                                :step="50"
+                                :disabled="!pagination.enabled"
+                                style="width: 100%"
+                                @change="syncPagination"
+                              />
+                            </a-form-item>
+                          </a-col>
+                        </a-row>
+
+                        <a-row :gutter="16">
+                          <a-col :span="6">
+                            <a-form-item label="起始偏移">
+                              <a-input-number
+                                v-model:value="pagination.start"
+                                :min="0"
+                                :disabled="!pagination.enabled"
+                                style="width: 100%"
+                                @change="syncPagination"
+                              />
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="6">
+                            <a-form-item label="增长间隔">
+                              <a-input-number
+                                v-model:value="pagination.step"
+                                :min="0"
+                                :max="1000000"
+                                :disabled="!pagination.enabled"
+                                style="width: 100%"
+                                @change="syncPagination"
+                              />
+                              <div class="fk-hint">0 表示与每页条数相同</div>
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="6">
+                            <a-form-item label="结束条件：本页条数 <">
+                              <a-input-number
+                                v-model:value="pagination.endWhenLessThan"
+                                :min="0"
+                                :max="10000"
+                                :disabled="!pagination.enabled"
+                                style="width: 100%"
+                                @change="syncPagination"
+                              />
+                              <div class="fk-hint">0 表示与每页条数相同</div>
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="6">
+                            <a-form-item label="偏移量字段路径">
+                              <a-input
+                                v-model:value="pagination.offsetPath"
+                                :disabled="!pagination.enabled"
+                                placeholder="data.StartRow"
+                                @change="syncPagination"
+                              />
+                            </a-form-item>
+                          </a-col>
+                        </a-row>
+
+                        <a-row :gutter="16">
+                          <a-col :span="6">
+                            <a-form-item label="每页条数字段路径">
+                              <a-input
+                                v-model:value="pagination.limitPath"
+                                :disabled="!pagination.enabled"
+                                placeholder="data.Limit"
+                                @change="syncPagination"
+                              />
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="18">
+                            <a-form-item label="配置预览">
+                              <div class="fk-hint" style="margin-top: 0; line-height: 1.9">
+                                每轮把
+                                <code>{{ pagination.offsetPath || 'data.StartRow' }}</code>
+                                写成「起始偏移 + 第几页 × 增长间隔」，并把
+                                <code>{{ pagination.limitPath || 'data.Limit' }}</code>
+                                写成每页条数；某页返回条数小于结束阈值即停止。
+                                金蝶 ExecuteBillQuery / BillQuery 的请求体默认就是
+                                <code>data.StartRow</code> 与 <code>data.Limit</code>。
+                              </div>
+                            </a-form-item>
+                          </a-col>
+                        </a-row>
+                      </a-collapse-panel>
+                    </a-collapse>
+
                     <!-- 结果提取 JsonPath -->
                     <a-row :gutter="16">
                       <a-col :span="16">
@@ -1282,6 +1413,44 @@ const defaultKingdeeQuery = () => ({
 })
 
 const kingdeeQuery = ref(defaultKingdeeQuery())
+
+// ===== 高级配置：分页取数（对应 t_etl_pipeline.api_pagination） =====
+const defaultPagination = () => ({
+  enabled: false,
+  offsetPath: 'data.StartRow',
+  limitPath: 'data.Limit',
+  start: 0,
+  step: 0,
+  pageSize: 2000,
+  maxPages: 200,
+  endWhenLessThan: 0,
+  intervalMs: 0
+})
+
+const pagination = ref(defaultPagination())
+const advancedActiveKeys = ref<string[]>([])
+
+// 未启用时写空串，后端据此走单次请求
+const syncPagination = () => {
+  formData.value.apiPagination = pagination.value.enabled
+    ? JSON.stringify(pagination.value)
+    : ''
+}
+
+const loadPagination = () => {
+  pagination.value = defaultPagination()
+  if (formData.value.apiPagination) {
+    try {
+      const parsed = JSON.parse(formData.value.apiPagination)
+      pagination.value = { ...pagination.value, ...parsed }
+      if (pagination.value.enabled) {
+        advancedActiveKeys.value = ['pagination']
+      }
+    } catch (e) {
+      pagination.value = defaultPagination()
+    }
+  }
+}
 
 // ===== 抽取字段清单（表格编辑 + Excel 导入导出） =====
 const fieldRows = ref<FieldRow[]>([])
@@ -1985,6 +2154,7 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     if (record.fieldMeta) {
       fieldRows.value = fieldRowsFromMeta(record.fieldMeta, kingdeeQuery.value.fieldKeys)
     }
+    loadPagination()
   } else {
     isEdit.value = false
     currentId.value = ''
@@ -1993,6 +2163,8 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
       folderId: defaultFolderId || undefined
     }
     kingdeeQuery.value = defaultKingdeeQuery()
+    pagination.value = defaultPagination()
+    advancedActiveKeys.value = []
     syncKingdeeLoginBody()
     syncKingdeeQueryToBody()
     rebuildFieldRows()
@@ -2009,6 +2181,8 @@ const handleReset = () => {
   if (!isEdit.value) {
     formData.value = initialFormData()
     kingdeeQuery.value = defaultKingdeeQuery()
+    pagination.value = defaultPagination()
+    advancedActiveKeys.value = []
     syncKingdeeLoginBody()
     syncKingdeeQueryToBody()
     rebuildFieldRows()
@@ -2027,6 +2201,8 @@ const prepareDataBeforeSave = () => {
     }
     // 字段清单元数据随流程保存（中文名/类型/启用/备注），供后端按类型建临时表
     formData.value.fieldMeta = fieldRowsToMetaJson(fieldRows.value)
+    // 分页配置只在启用时落库，避免残留旧配置
+    syncPagination()
   } else {
     // 非 WebAPI 源不使用字段清单，清空避免残留类型影响临时表
     formData.value.fieldMeta = ''

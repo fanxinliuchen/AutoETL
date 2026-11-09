@@ -66,60 +66,149 @@ public class WebApiExtractor {
 
         logBuffer.append(String.format("[WebAPI] 数据拉取地址: %s, 方式: %s\n", apiUrl, method));
 
+        // 分页配置存在且启用时走分页循环，否则保持原有单次请求
+        PaginationConfig pagination = PaginationConfig.parse(pipeline.getApiPagination());
+        if (pagination != null) {
+            return extractPaged(pipeline, headers, apiUrl, method, jsonPath, pagination, logBuffer);
+        }
+
+        List<String> fieldKeys = parseFieldKeysFromRequestBody(pipeline.getApiBody());
+        String body = sendOnce(apiUrl, method, headers, pipeline.getApiBody());
+        logBuffer.append(String.format("[WebAPI] 响应成功，数据长度: %d 字符\n", body != null ? body.length() : 0));
+
+        List<Map<String, Object>> records = parseRecords(body, jsonPath, fieldKeys);
+        logBuffer.append(String.format("[WebAPI] JsonPath (%s) 抽取解析得到: %d 条记录\n", jsonPath, records.size()));
+        return records;
+    }
+
+    /**
+     * 偏移量分页抽取：每轮改写请求体中的偏移/每页条数，直到本页条数小于结束阈值或达到取数上限
+     */
+    private List<Map<String, Object>> extractPaged(EtlPipeline pipeline,
+                                                   Map<String, String> headers,
+                                                   String apiUrl,
+                                                   String method,
+                                                   String jsonPath,
+                                                   PaginationConfig pagination,
+                                                   StringBuilder logBuffer) {
+        if (!"POST".equals(method)) {
+            throw new BizException(ErrorCode.PARAM_ERROR, "分页取数目前仅支持 POST 请求体方式");
+        }
+        if (StrUtil.isBlank(pipeline.getApiBody())) {
+            throw new BizException(ErrorCode.PARAM_ERROR, "分页取数要求填写请求体 Body");
+        }
+
+        JSONObject baseBody;
+        try {
+            baseBody = JSONUtil.parseObj(pipeline.getApiBody());
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.PARAM_ERROR, "分页取数要求请求体为合法 JSON: " + e.getMessage());
+        }
+
+        List<String> fieldKeys = parseFieldKeysFromRequestBody(pipeline.getApiBody());
+        List<Map<String, Object>> all = new ArrayList<>();
+
+        logBuffer.append(String.format(
+                "[WebAPI-分页] 偏移量分页已启用: 每页 %d 条, 最多 %d 次, 起始 %d, 间隔 %d, 结束阈值 < %d, 请求间隔 %d ms\n",
+                pagination.getPageSize(), pagination.getMaxPages(), pagination.getStart(),
+                pagination.effectiveStep(), pagination.effectiveEnd(), pagination.getIntervalMs()));
+
+        for (int page = 0; page < pagination.getMaxPages(); page++) {
+            int offset = pagination.offsetOf(page);
+            JSONObject pageBody = JSONUtil.parseObj(baseBody.toString());
+            PaginationConfig.setPath(pageBody, pagination.getOffsetPath(), offset);
+            PaginationConfig.setPath(pageBody, pagination.getLimitPath(), pagination.getPageSize());
+
+            List<Map<String, Object>> pageRecords;
+            try {
+                String body = sendOnce(apiUrl, method, headers, pageBody.toString());
+                pageRecords = parseRecords(body, jsonPath, fieldKeys);
+            } catch (BizException be) {
+                throw new BizException(ErrorCode.ETL_EXECUTE_ERROR, String.format(
+                        "分页第 %d 页拉取失败（此前已成功 %d 页 / %d 条）: %s",
+                        page + 1, page, all.size(), be.getMessage()));
+            }
+
+            all.addAll(pageRecords);
+            logBuffer.append(String.format("[WebAPI-分页] 第 %d 页: 偏移=%d, 本页 %d 条, 累计 %d 条\n",
+                    page + 1, offset, pageRecords.size(), all.size()));
+
+            if (pageRecords.size() < pagination.effectiveEnd()) {
+                logBuffer.append("[WebAPI-分页] 本页条数小于结束阈值，分页结束\n");
+                break;
+            }
+            if (page + 1 >= pagination.getMaxPages()) {
+                logBuffer.append("[WebAPI-分页] 已达最多取数次数上限，停止翻页（可能仍有剩余数据）\n");
+                break;
+            }
+            if (pagination.getIntervalMs() > 0) {
+                try {
+                    Thread.sleep(pagination.getIntervalMs());
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    logBuffer.append("[WebAPI-分页] 线程被中断，提前结束分页\n");
+                    break;
+                }
+            }
+        }
+        logBuffer.append(String.format("[WebAPI-分页] 分页抽取完成，共 %d 条记录\n", all.size()));
+        return all;
+    }
+
+    /**
+     * 发送一次请求并返回响应体
+     */
+    private String sendOnce(String apiUrl, String method, Map<String, String> headers, String body) {
         HttpRequest request = "POST".equals(method) ? HttpRequest.post(apiUrl) : HttpRequest.get(apiUrl);
         if (!headers.isEmpty()) {
             request.addHeaders(headers);
         }
-        if ("POST".equals(method) && StrUtil.isNotBlank(pipeline.getApiBody())) {
-            request.body(pipeline.getApiBody());
+        if ("POST".equals(method) && StrUtil.isNotBlank(body)) {
+            request.body(body);
         }
-
         try (HttpResponse response = request.timeout(30000).execute()) {
             if (!response.isOk()) {
                 throw new BizException(ErrorCode.ETL_EXECUTE_ERROR,
                         "WebAPI 响应异常，HTTP状态码: " + response.getStatus());
             }
-
-            String body = response.body();
-            logBuffer.append(String.format("[WebAPI] 响应成功，数据长度: %d 字符\n", body != null ? body.length() : 0));
-
-            // 执行 JsonPath 提取
-            Object extracted = JsonPath.read(body, jsonPath);
-            List<Map<String, Object>> records = new ArrayList<>();
-
-            // 尝试从请求体解析金蝶 FieldKeys，用于二维数组还原列名
-            List<String> fieldKeys = parseFieldKeysFromRequestBody(pipeline.getApiBody());
-
-            if (extracted instanceof List<?> list) {
-                for (Object item : list) {
-                    if (item instanceof Map<?, ?> map) {
-                        Map<String, Object> record = new LinkedHashMap<>();
-                        map.forEach((k, v) -> record.put(String.valueOf(k), v));
-                        records.add(record);
-                    } else if (item instanceof List<?> rowList) {
-                        // 金蝶 ExecuteBillQuery 常返回二维数组: [ [1, "A"], [2, "B"] ]
-                        Map<String, Object> record = new LinkedHashMap<>();
-                        for (int i = 0; i < rowList.size(); i++) {
-                            String colName = (fieldKeys != null && i < fieldKeys.size()) ? fieldKeys.get(i) : "col_" + i;
-                            record.put(colName, rowList.get(i));
-                        }
-                        records.add(record);
-                    }
-                }
-            } else if (extracted instanceof Map<?, ?> map) {
-                Map<String, Object> record = new LinkedHashMap<>();
-                map.forEach((k, v) -> record.put(String.valueOf(k), v));
-                records.add(record);
-            }
-
-            logBuffer.append(String.format("[WebAPI] JsonPath (%s) 抽取解析得到: %d 条记录\n", jsonPath, records.size()));
-            return records;
+            return response.body();
         } catch (BizException be) {
             throw be;
         } catch (Exception ex) {
             log.error("WebAPI 请求执行失败: {}", ex.getMessage());
             throw new BizException(ErrorCode.ETL_EXECUTE_ERROR, "WebAPI 抽取失败: " + ex.getMessage());
         }
+    }
+
+    /**
+     * 按 JsonPath 解析响应，支持对象数组与金蝶二维数组两种形态
+     */
+    private List<Map<String, Object>> parseRecords(String body, String jsonPath, List<String> fieldKeys) {
+        Object extracted = JsonPath.read(body, jsonPath);
+        List<Map<String, Object>> records = new ArrayList<>();
+
+        if (extracted instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> map) {
+                    Map<String, Object> record = new LinkedHashMap<>();
+                    map.forEach((k, v) -> record.put(String.valueOf(k), v));
+                    records.add(record);
+                } else if (item instanceof List<?> rowList) {
+                    // 金蝶 ExecuteBillQuery 常返回二维数组: [ [1, "A"], [2, "B"] ]
+                    Map<String, Object> record = new LinkedHashMap<>();
+                    for (int i = 0; i < rowList.size(); i++) {
+                        String colName = (fieldKeys != null && i < fieldKeys.size()) ? fieldKeys.get(i) : "col_" + i;
+                        record.put(colName, rowList.get(i));
+                    }
+                    records.add(record);
+                }
+            }
+        } else if (extracted instanceof Map<?, ?> map) {
+            Map<String, Object> record = new LinkedHashMap<>();
+            map.forEach((k, v) -> record.put(String.valueOf(k), v));
+            records.add(record);
+        }
+        return records;
     }
 
     /**
