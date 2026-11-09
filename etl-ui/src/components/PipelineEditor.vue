@@ -109,7 +109,7 @@
           </a-tab-pane>
 
           <!-- Tab 2: 数据抽取配置 (Source) - 强化金蝶等复杂WebAPI -->
-          <a-tab-pane key="2" tab="📥 2. 数据抽取配置 (Source)">
+          <a-tab-pane key="2" tab="📥 2. 数据抽取配置">
             <div class="tab-pane-content">
               <!-- MySQL 源模式 -->
               <div v-if="formData.sourceType === 'MYSQL'">
@@ -1245,7 +1245,7 @@
           </a-tab-pane>
 
           <!-- Tab 3: SQL 处理与转换脚本 (Transform) -->
-          <a-tab-pane key="3" tab="🔄 3. SQL 转换处理 (Transform)">
+          <a-tab-pane key="3" tab="🔄 3. SQL 转换处理（可选）">
             <div class="tab-pane-content">
               <a-alert
                 message="💡 数据流转机制说明"
@@ -1256,7 +1256,7 @@
               />
 
               <a-card :bordered="false" class="pane-card">
-                <a-form-item name="transformSql" required>
+                <a-form-item name="transformSql">
                   <SqlEditor
                     v-model="formData.transformSql"
                     placeholder="-- 清空目标表并覆盖写入示例：
@@ -1286,7 +1286,7 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
           </a-tab-pane>
 
           <!-- Tab 4: 目标数仓输出配置 (Sink) -->
-          <a-tab-pane key="4" tab="📤 4. 目标数仓输出 (Sink)">
+          <a-tab-pane key="4" tab="📤 4. 目标数仓输出">
             <div class="tab-pane-content">
               <a-card :bordered="false" class="pane-card">
                 <a-row :gutter="24">
@@ -1342,7 +1342,7 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
           </a-tab-pane>
 
           <!-- Tab 5: 调度与告警通知 -->
-          <a-tab-pane key="5" tab="⏰ 5. 调度与告警 (Schedule & Alert)">
+          <a-tab-pane key="5" tab="⏰ 5. 调度与告警">
             <div class="tab-pane-content">
               <a-card :bordered="false" class="pane-card">
                 <a-row :gutter="24">
