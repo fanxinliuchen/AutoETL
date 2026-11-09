@@ -36,6 +36,7 @@ public class EtlKingdeeCredentialController {
     public R<Map<String, Object>> save(@RequestBody @Valid KingdeeCredentialSaveDTO dto) {
         EtlKingdeeCredential input = new EtlKingdeeCredential();
         input.setLoginUrl(dto.getLoginUrl());
+        input.setQueryUrl(dto.getQueryUrl());
         input.setAcctId(dto.getAcctID());
         input.setUserName(dto.getUserName());
         // DTO 中为明文，交由 Service 加密后落库
@@ -54,6 +55,7 @@ public class EtlKingdeeCredentialController {
     private Map<String, Object> toMasked(EtlKingdeeCredential credential) {
         Map<String, Object> masked = new LinkedHashMap<>();
         masked.put("loginUrl", credential.getLoginUrl());
+        masked.put("queryUrl", credential.getQueryUrl());
         masked.put("acctID", credential.getAcctId());
         masked.put("userName", credential.getUserName());
         masked.put("lcid", credential.getLcid());

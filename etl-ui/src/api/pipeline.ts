@@ -69,6 +69,7 @@ export function queryKingdeeFormFields(data: {
 
 export interface KingdeeCredentialMasked {
   loginUrl?: string
+  queryUrl?: string
   acctID?: string
   userName?: string
   lcid?: number
@@ -78,6 +79,7 @@ export interface KingdeeCredentialMasked {
 
 export function saveKingdeeCredential(data: {
   loginUrl: string
+  queryUrl?: string
   acctID?: string
   userName?: string
   password?: string

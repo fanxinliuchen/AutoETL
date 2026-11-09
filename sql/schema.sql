@@ -177,6 +177,7 @@ CREATE TABLE t_etl_kingdee_credential (
     id               BIGINT       NOT NULL COMMENT '主键ID',
     cred_name        VARCHAR(64)  NULL     DEFAULT '默认凭证' COMMENT '凭证名称',
     login_url        VARCHAR(512) NOT NULL COMMENT '金蝶登录接口地址',
+    query_url        VARCHAR(512) NULL     COMMENT '单据查询接口地址(ExecuteBillQuery/BillQuery)',
     acct_id          VARCHAR(64)  NULL     COMMENT '数据中心/账套代码 acctID',
     user_name        VARCHAR(64)  NULL     COMMENT '登录用户名',
     password_cipher  VARCHAR(512) NOT NULL COMMENT '加密密码(AES)',

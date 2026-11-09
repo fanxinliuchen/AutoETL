@@ -17,6 +17,9 @@ public class KingdeeCredentialSaveDTO implements Serializable {
     @NotBlank(message = "金蝶登录接口地址不能为空")
     private String loginUrl;
 
+    /** 单据查询接口地址（ExecuteBillQuery / BillQuery） */
+    private String queryUrl;
+
     /** 数据中心 / 账套代码 */
     private String acctID;
 

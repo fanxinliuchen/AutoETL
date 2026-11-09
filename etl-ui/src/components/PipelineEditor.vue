@@ -323,6 +323,9 @@
                         <a-button size="small" @click="loadKingdeeBillTemplate('BD_MATERIAL')">
                           🏭 物料清单
                         </a-button>
+                        <a-button size="small" :loading="savingCredential" @click="handleSaveCredential">
+                          💾 保存为默认
+                        </a-button>
                         <a-button size="small" @click="formatJsonBody">
                           🪄 格式化 JSON
                         </a-button>
@@ -1695,7 +1698,21 @@ const applyCredentialToForm = (credential: KingdeeCredentialMasked) => {
     lcid: credential.lcid || 2052
   }
   hasSavedPassword.value = !!credential.hasPassword
+  // 单据查询接口地址随凭证一起载入；没存过则按登录地址推导一个默认值
+  if (credential.queryUrl) {
+    formData.value.apiUrl = credential.queryUrl
+  } else if (!formData.value.apiUrl && credential.loginUrl) {
+    formData.value.apiUrl = buildQueryUrl(credential.loginUrl)
+  }
   syncKingdeeLoginBody()
+}
+
+// 由登录地址推导单据查询接口（沿用登录地址的大小写风格）
+const buildQueryUrl = (loginUrl: string) => {
+  const host = extractHost(loginUrl)
+  if (!host) return ''
+  const prefix = loginUrl.includes('/K3Cloud/') ? '/K3Cloud/' : '/k3cloud/'
+  return `${host}${prefix}Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteBillQuery.common.kdsvc`
 }
 
 // 保存当前表单中的凭证（密码加密落库；留空表示沿用旧密码）
@@ -1720,6 +1737,8 @@ const handleSaveCredential = async () => {
   try {
     const saved = await saveKingdeeCredential({
       loginUrl: kingdeeConfig.value.loginUrl.trim(),
+      // 单据查询接口地址一并保存，下次载入凭证时自动回填
+      queryUrl: formData.value.apiUrl?.trim() || undefined,
       acctID: kingdeeConfig.value.acctID?.trim(),
       userName: kingdeeConfig.value.userName?.trim(),
       password: effectivePassword() || undefined,

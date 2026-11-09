@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS t_etl_kingdee_credential (
     id               BIGINT       NOT NULL,
     cred_name        VARCHAR(64)  NULL     DEFAULT '默认凭证',
     login_url        VARCHAR(512) NOT NULL,
+    query_url        VARCHAR(512) NULL,
     acct_id          VARCHAR(64)  NULL,
     user_name        VARCHAR(64)  NULL,
     password_cipher  VARCHAR(512) NOT NULL,

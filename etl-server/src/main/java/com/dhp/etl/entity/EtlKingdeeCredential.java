@@ -22,6 +22,9 @@ public class EtlKingdeeCredential extends BaseTenantEntity {
     /** 金蝶登录接口地址 */
     private String loginUrl;
 
+    /** 单据查询接口地址（ExecuteBillQuery / BillQuery），随凭证一起保存与载入 */
+    private String queryUrl;
+
     /** 数据中心 / 账套代码 acctID */
     private String acctId;
 

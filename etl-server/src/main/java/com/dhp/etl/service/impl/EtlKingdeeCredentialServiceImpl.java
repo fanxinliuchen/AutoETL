@@ -47,6 +47,7 @@ public class EtlKingdeeCredentialServiceImpl
             }
             input.setId(null);
             input.setLoginUrl(input.getLoginUrl().trim());
+            input.setQueryUrl(StrUtil.trim(input.getQueryUrl()));
             input.setAcctId(StrUtil.trim(input.getAcctId()));
             input.setUserName(StrUtil.trim(input.getUserName()));
             input.setPasswordCipher(cipherUtil.encrypt(input.getPasswordCipher()));
@@ -59,6 +60,10 @@ public class EtlKingdeeCredentialServiceImpl
         }
 
         existing.setLoginUrl(input.getLoginUrl().trim());
+        // 查询接口地址留空时保留旧值，避免从登录步骤保存时把已存地址清掉
+        if (StrUtil.isNotBlank(input.getQueryUrl())) {
+            existing.setQueryUrl(input.getQueryUrl().trim());
+        }
         existing.setAcctId(StrUtil.trim(input.getAcctId()));
         existing.setUserName(StrUtil.trim(input.getUserName()));
         if (input.getLcid() != null) {
