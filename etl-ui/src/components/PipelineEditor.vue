@@ -405,6 +405,11 @@
                             v-model:value="formData.apiUrl"
                             placeholder="例如：http://10.10.12.3/k3cloud/Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteBillQuery.common.kdsvc"
                           />
+                          <div v-if="reportUrlMalformed" class="body-warn">
+                            金蝶服务地址的装配名分隔符是<b>英文逗号</b>，不是点号：
+                            <code>{{ normalizedApiUrl }}</code>
+                            <a style="margin-left: 8px" @click="fixReportUrl">一键修正</a>
+                          </div>
                         </a-form-item>
                       </a-col>
                     </a-row>
@@ -466,6 +471,18 @@
                               >
                                 <api-outlined /> 从金蝶拉字段
                               </a-button>
+                              <a-tooltip
+                                v-if="bodyMode === 'REPORT'"
+                                title="报表没有列定义接口，这里用 GetReportData 试取 1 行，按返回的 key 反推字段"
+                              >
+                                <a-button
+                                  size="small"
+                                  :loading="reportFieldsLoading"
+                                  @click="handleDetectReportFields"
+                                >
+                                  <table-outlined /> 从报表试取字段
+                                </a-button>
+                              </a-tooltip>
                               <a-button size="small" @click="handleInferTypes">
                                 <bulb-outlined /> 推断类型
                               </a-button>
@@ -1957,6 +1974,7 @@ import {
   previewWebapiExtract,
   queryKingdeeFormFields,
   detectKingdeeForm,
+  detectKingdeeReportFields,
   saveKingdeeCredential,
   getKingdeeCredentialDefault,
   evaluateVariable,
@@ -2174,6 +2192,22 @@ const detectFormType = async () => {
   } finally {
     detectLoading.value = false
   }
+}
+
+// ===== 金蝶服务地址纠错 =====
+// K3Cloud 的装配名分隔符是英文逗号：GetReportData,Kingdee.K3.SCM...common.kdsvc
+// 误写成点号时金蝶会直接返回 "... no found"，是报表方案跑不通的最常见原因
+const K3_ASSEMBLY_DOT = /\.(Kingdee\.[A-Za-z0-9_.]+)\.common\.kdsvc$/i
+
+const normalizeK3Url = (url: string) =>
+  String(url || '').replace(K3_ASSEMBLY_DOT, ',$1.common.kdsvc')
+
+const reportUrlMalformed = computed(() => K3_ASSEMBLY_DOT.test(formData.value.apiUrl || ''))
+const normalizedApiUrl = computed(() => normalizeK3Url(formData.value.apiUrl || ''))
+
+const fixReportUrl = () => {
+  formData.value.apiUrl = normalizedApiUrl.value
+  message.success('接口地址已修正为逗号分隔')
 }
 
 // 报表模式的条件预览
@@ -2906,6 +2940,8 @@ const pastePlaceholder = 'FID\t单据内码\nFBillNo\t单据编号\nFSupplierId.
 const kingdeeFieldModalVisible = ref(false)
 const kingdeeFieldsLoading = ref(false)
 const kingdeeFieldError = ref('')
+// 报表方案：试取 1 行推断字段
+const reportFieldsLoading = ref(false)
 const kingdeeFields = ref<Array<KingdeeFieldMeta & { checked: boolean }>>([])
 const kingdeeCheckedCount = computed(() => kingdeeFields.value.filter((f) => f.checked).length)
 const kingdeeColumns: any[] = [
@@ -3244,6 +3280,67 @@ const handlePullKingdeeFields = async () => {
     kingdeeFieldError.value = e?.message || '拉取字段失败，请检查登录配置'
   } finally {
     kingdeeFieldsLoading.value = false
+  }
+}
+
+/**
+ * 报表方案：试取 1 行推断字段。
+ *
+ * <p>报表没有列定义接口，只能靠 GetReportData 返回的首行反推 key。
+ * 方案查不出数据时明确告知，而不是让用户以为功能坏了。
+ */
+const handleDetectReportFields = async () => {
+  const formId = kingdeeQuery.value.formId?.trim()
+  if (!formId) {
+    message.warning('请先填写报表 FORMID')
+    return
+  }
+  if (!schemeId.value?.trim()) {
+    message.warning('请先填写过滤方案 ID (FSCHEMEID)')
+    return
+  }
+  if (!kingdeeConfig.value.loginUrl) {
+    message.warning('请先在上方填写金蝶登录接口地址')
+    return
+  }
+  reportFieldsLoading.value = true
+  try {
+    const res = await detectKingdeeReportFields({
+      loginUrl: kingdeeConfig.value.loginUrl,
+      acctID: kingdeeConfig.value.acctID,
+      userName: kingdeeConfig.value.userName,
+      password: effectivePassword() || undefined,
+      lcid: kingdeeConfig.value.lcid,
+      formId,
+      schemeId: schemeId.value.trim(),
+      reportUrl: formData.value.apiUrl?.trim() || undefined
+    })
+    if (!res?.fields?.length) {
+      message.warning(res?.message || '未能从报表结果推断出字段')
+      return
+    }
+    const existed = new Set(fieldRows.value.map((r) => r.fieldKey.trim().toUpperCase()))
+    const rows = mergeRows(
+      res.fields.map((f) => f.key),
+      fieldRows.value
+    )
+    res.fields.forEach((f) => {
+      if (existed.has((f.key || '').toUpperCase())) return
+      const row = rows.find((r) => r.fieldKey.trim().toUpperCase() === f.key.toUpperCase())
+      if (!row) return
+      row.label = f.label && f.label !== f.key ? f.label : ''
+      row.type = f.type || row.type
+    })
+    fieldRows.value = rows
+    kingdeeQuery.value.fieldKeys = joinFieldKeys(rows)
+    syncKingdeeQueryToBody()
+    message.success(
+      `已按报表首行推断出 ${res.fields.length} 个字段（报表返回中没有中文名，可用 Excel 补全）`
+    )
+  } catch (e: any) {
+    message.error('报表字段推断失败：' + (e?.message || '未知异常'))
+  } finally {
+    reportFieldsLoading.value = false
   }
 }
 
@@ -3796,6 +3893,8 @@ const handleReset = () => {
 const prepareDataBeforeSave = () => {
   bodySaveWarning.value = ''
   if (formData.value.sourceType === 'WEB_API') {
+    // 服务地址的装配名分隔符纠正为逗号，避免保存后运行时报 "no found"
+    formData.value.apiUrl = normalizeK3Url(formData.value.apiUrl || '')
     if (formData.value.apiAuthType === 'KINGDEE_K3') {
       syncKingdeeLoginBody()
       // 请求体优先用户手改的原文：结构识别不出来时绝不回写向导字段，

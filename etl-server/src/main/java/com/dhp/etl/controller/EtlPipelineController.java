@@ -4,11 +4,13 @@ import com.dhp.common.base.BaseCrudController;
 import com.dhp.common.base.IBaseCrudService;
 import com.dhp.common.result.R;
 import com.dhp.etl.core.extractor.KingdeeMetadataClient;
+import com.dhp.etl.core.extractor.KingdeeReportClient;
 import com.dhp.etl.core.extractor.RequestVarResolver;
 import com.dhp.etl.core.extractor.WebApiExtractor;
 import com.dhp.etl.core.guard.SqlSafetyGuard;
 import com.dhp.etl.core.loop.LoopDatasetService;
 import com.dhp.etl.dto.KingdeeFormFieldQueryDTO;
+import com.dhp.etl.dto.KingdeeReportFieldQueryDTO;
 import com.dhp.etl.dto.LoopEvalDTO;
 import com.dhp.etl.dto.SqlValidateDTO;
 import com.dhp.etl.dto.VarEvalDTO;
@@ -35,6 +37,7 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
     private final SqlSafetyGuard sqlSafetyGuard;
     private final WebApiExtractor webApiExtractor;
     private final KingdeeMetadataClient kingdeeMetadataClient;
+    private final KingdeeReportClient kingdeeReportClient;
     private final RequestVarResolver requestVarResolver;
     private final LoopDatasetService loopDatasetService;
 
@@ -123,6 +126,13 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
     public R<Map<String, Object>> detectKingdeeFormType(
             @RequestBody @Valid KingdeeFormFieldQueryDTO dto) {
         return R.ok(kingdeeMetadataClient.detectFormType(dto));
+    }
+
+    @Operation(summary = "从金蝶报表试取 1 行推断字段（报表方案）")
+    @PostMapping("/webapi/report-fields")
+    public R<Map<String, Object>> queryKingdeeReportFields(
+            @RequestBody @Valid KingdeeReportFieldQueryDTO dto) {
+        return R.ok(kingdeeReportClient.detectFields(dto));
     }
 
     @Operation(summary = "WebAPI 抽取测试与数据预览")

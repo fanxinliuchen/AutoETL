@@ -88,6 +88,32 @@ export function detectKingdeeForm(data: KingdeeFormQueryParams): Promise<FormTyp
   return request.post('/etl/pipeline/webapi/detect-form', data, { silent: true })
 }
 
+/** 报表字段推断结果：报表没有列定义接口，只能试取 1 行按 key 反推 */
+export interface ReportFieldDetectResult {
+  fields: KingdeeFieldMeta[]
+  fieldCount: number
+  totalCount: number
+  message: string
+}
+
+/**
+ * 报表方案：用 GetReportData 试取 1 行推断字段。
+ * FieldKeys 留空时金蝶按过滤方案返回全部列，行对象的 key 就是字段标识。
+ */
+export function detectKingdeeReportFields(data: {
+  loginUrl: string
+  acctID?: string
+  userName?: string
+  password?: string
+  lcid?: number
+  formId: string
+  schemeId: string
+  /** 报表取数接口地址；留空由登录地址推导，点号装配名会被后端纠正为逗号 */
+  reportUrl?: string
+}): Promise<ReportFieldDetectResult> {
+  return request.post('/etl/pipeline/webapi/report-fields', data, { silent: true })
+}
+
 export interface KingdeeCredentialMasked {
   loginUrl?: string
   queryUrl?: string
