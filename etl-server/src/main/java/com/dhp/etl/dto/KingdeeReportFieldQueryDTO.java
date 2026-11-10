@@ -41,4 +41,10 @@ public class KingdeeReportFieldQueryDTO implements Serializable {
 
     /** 报表取数接口地址（可选，留空按登录地址推导） */
     private String reportUrl;
+
+    /** 快捷过滤条件（可选）：字段值等值条件，对应报表过滤框的快捷页签 */
+    private java.util.List<java.util.Map<String, Object>> quicklyConditions;
+
+    /** 高级条件（可选）：支持 =、>、<、LIKE 等比较符，对应条件/高级页签 */
+    private java.util.List<java.util.Map<String, Object>> moreConditions;
 }

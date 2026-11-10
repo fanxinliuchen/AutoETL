@@ -110,6 +110,9 @@ export function detectKingdeeReportFields(data: {
   schemeId: string
   /** 报表取数接口地址；留空由登录地址推导，点号装配名会被后端纠正为逗号 */
   reportUrl?: string
+  /** 试取时一并带上当前条件，方案需要日期/组织才能出数时很有用 */
+  quicklyConditions?: Record<string, unknown>[]
+  moreConditions?: Record<string, unknown>[]
 }): Promise<ReportFieldDetectResult> {
   return request.post('/etl/pipeline/webapi/report-fields', data, { silent: true })
 }
