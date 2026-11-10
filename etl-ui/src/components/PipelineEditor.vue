@@ -943,6 +943,79 @@
                       </div>
                     </div>
 
+                    <!-- 循环取数 -->
+                    <div class="loop-box">
+                      <div class="loop-head">
+                        <span class="loop-title">循环取数</span>
+                        <a-switch
+                          v-model:checked="loopConfig.enabled"
+                          checked-children="已开启"
+                          un-checked-children="未开启"
+                          @change="onLoopEdited"
+                        />
+                        <span class="loop-hint">
+                          按循环 SQL 返回的每一行跑一轮完整流程（串行，某轮失败即中止后续）
+                        </span>
+                        <a-button
+                          v-if="loopConfig.enabled"
+                          size="small"
+                          :loading="loopPreviewLoading"
+                          @click="previewLoop"
+                        >
+                          试算
+                        </a-button>
+                      </div>
+                      <template v-if="loopConfig.enabled">
+                        <a-textarea
+                          v-model:value="loopConfig.sql"
+                          :rows="5"
+                          class="code-textarea"
+                          :placeholder="loopSqlPlaceholder"
+                          @change="onLoopEdited"
+                        />
+                        <a-row :gutter="16" style="margin-top: 8px">
+                          <a-col :span="8">
+                            <a-form-item label="最多循环次数">
+                              <a-input-number
+                                v-model:value="loopConfig.maxIterations"
+                                :min="1"
+                                :max="10000"
+                                style="width: 100%"
+                                @change="onLoopEdited"
+                              />
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="8">
+                            <a-form-item label="每轮间隔 (ms)">
+                              <a-input-number
+                                v-model:value="loopConfig.intervalMs"
+                                :min="0"
+                                :max="60000"
+                                style="width: 100%"
+                                @change="onLoopEdited"
+                              />
+                            </a-form-item>
+                          </a-col>
+                        </a-row>
+                        <div class="fk-hint">
+                          列名即变量名，会覆盖「变量定义」里的同名变量；多维度组合（如 13 个工厂 × 4 个会计周）
+                          直接在 SQL 里 CROSS JOIN 出行，系统逐行执行。
+                        </div>
+                        <div v-if="loopPreview" class="loop-preview">
+                          <div class="loop-preview-head">
+                            共 <b>{{ loopPreview.rowCount }}</b> 轮 · 列：
+                            {{ loopPreview.columns.join(', ') }}
+                          </div>
+                          <div v-for="(r, i) in loopPreview.rows" :key="i" class="loop-preview-row">
+                            {{ i + 1 }}. {{ formatLoopRow(r) }}
+                          </div>
+                          <div v-if="loopPreview.rowCount > loopPreview.rows.length" class="loop-preview-more">
+                            …… 其余 {{ loopPreview.rowCount - loopPreview.rows.length }} 轮未展示
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+
                     <a-row :gutter="16" v-if="bodyMode !== 'REPORT'">
                       <a-col :span="12">
                         <a-form-item label="排序规则 (OrderString)">
@@ -1851,6 +1924,7 @@ import {
   saveKingdeeCredential,
   getKingdeeCredentialDefault,
   evaluateVariable,
+  evaluateLoop,
   listTargetTables,
   describeTargetTable,
   applyTargetSchema,
@@ -2092,6 +2166,66 @@ const defaultFilterVariable = (): FilterVariable => {
 
 const filterConditions = ref<FilterCondition[]>([])
 const filterVariables = ref<FilterVariable[]>([])
+
+// ===== 循环取数：循环 SQL 返回多行，每行跑一轮完整流程 =====
+interface LoopConfigForm {
+  enabled: boolean
+  sql: string
+  maxIterations: number
+  intervalMs: number
+}
+
+const defaultLoopConfig = (): LoopConfigForm => ({
+  enabled: false,
+  sql: '',
+  maxIterations: 200,
+  intervalMs: 0
+})
+
+const loopConfig = ref<LoopConfigForm>(defaultLoopConfig())
+const loopPreviewLoading = ref(false)
+const loopPreview = ref<{ columns: string[]; rowCount: number; rows: Record<string, string>[] } | null>(
+  null
+)
+
+const loopSqlPlaceholder = `WITH RECURSIVE weeks AS (
+  SELECT DATE_SUB('2026-10-01', INTERVAL ((WEEKDAY('2026-10-01') + 3) % 7) DAY) AS startdate
+  UNION ALL
+  SELECT DATE_ADD(startdate, INTERVAL 7 DAY) FROM weeks
+  WHERE DATE_ADD(startdate, INTERVAL 7 DAY) <= LAST_DAY('2026-10-01')
+)
+SELECT startdate, DATE_ADD(startdate, INTERVAL 6 DAY) AS enddate FROM weeks`
+
+const onLoopEdited = () => {
+  loopPreview.value = null
+  applyFilterConditions()
+}
+
+const formatLoopRow = (row: Record<string, string>) =>
+  Object.entries(row)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('  ')
+
+const previewLoop = async () => {
+  if (!loopConfig.value.sql.trim()) {
+    message.warning('请先填写循环数据集 SQL')
+    return
+  }
+  if (!formData.value.targetDsId) {
+    message.warning('请先选择目标数据源：循环 SQL 在目标库上执行')
+    return
+  }
+  loopPreviewLoading.value = true
+  try {
+    loopPreview.value = await evaluateLoop({
+      targetDsId: formData.value.targetDsId,
+      sql: loopConfig.value.sql.trim(),
+      limit: 5
+    })
+  } finally {
+    loopPreviewLoading.value = false
+  }
+}
 
 // ===== 增量同步（SYNC）配置：随流程存于 sync_config =====
 const defaultSyncConfig = () => ({
@@ -2413,6 +2547,14 @@ const applyFilterConditions = () => {
     variables: filterVariables.value
       .map((v) => ({ name: v.name.trim(), sql: v.sql.trim() }))
       .filter((v) => v.name && v.sql),
+    loop: loopConfig.value.enabled
+      ? {
+          enabled: true,
+          sql: loopConfig.value.sql.trim(),
+          maxIterations: loopConfig.value.maxIterations,
+          intervalMs: loopConfig.value.intervalMs
+        }
+      : { enabled: false },
     conditions: filterConditions.value
   })
   syncKingdeeQueryToBody()
@@ -2538,11 +2680,22 @@ const loadFilter = (preserveMode = false) => {
   }
   let conditions: FilterCondition[] | null = null
   filterVariables.value = []
+  loopConfig.value = defaultLoopConfig()
+  loopPreview.value = null
   if (formData.value.filterMeta) {
     try {
       const parsed = JSON.parse(formData.value.filterMeta)
       if (parsed?.mode === 'text') {
         filterMode.value = 'text'
+      }
+      if (parsed?.loop) {
+        loopConfig.value = {
+          ...defaultLoopConfig(),
+          enabled: !!parsed.loop.enabled,
+          sql: String(parsed.loop.sql ?? ''),
+          maxIterations: Number(parsed.loop.maxIterations) || 200,
+          intervalMs: Number(parsed.loop.intervalMs) || 0
+        }
       }
       if (Array.isArray(parsed?.variables)) {
         filterVariables.value = parsed.variables
@@ -3922,6 +4075,58 @@ defineExpose({ open })
 .var-empty {
   padding: 2px 2px 6px;
   font-size: 12px;
+  color: #bfbfbf;
+}
+
+.loop-box {
+  margin-top: 4px;
+  padding: 10px 12px 4px;
+  background: #fff;
+  border: 1px dashed #e8d5b7;
+  border-radius: 6px;
+}
+
+.loop-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.loop-title {
+  flex: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: #a8681b;
+}
+
+.loop-hint {
+  flex: 1;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.loop-preview {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #fafafa;
+  border-radius: 4px;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+  color: #595959;
+}
+
+.loop-preview-head {
+  margin-bottom: 4px;
+  color: #262626;
+}
+
+.loop-preview-row {
+  line-height: 1.8;
+  word-break: break-all;
+}
+
+.loop-preview-more {
   color: #bfbfbf;
 }
 

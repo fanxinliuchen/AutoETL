@@ -205,6 +205,20 @@ pnpm dev
 
     后端自动识别 `parameters` 结构：分页字段写到 `parameters[0].StartRow` / `Limit`，并从同一位置读取 `FieldKeys`；
     若显式配置过 `offsetPath` / `limitPath`，以显式配置为准。报表模式的过滤条件同样支持 `${变量}`，变量仍由「变量定义」里的 SQL 计算。
+  * **循环取数**（一次运行跑多轮，第 2 步配置）：
+    * 填写一段返回多行的 SQL，**列名即变量名**，每行触发一轮完整流程。
+    * 变量优先级：循环变量 > 变量定义 > 内置变量；抽取条件、请求体、MySQL 源 SQL 里的 `${name}` 都会按当轮取值替换。
+    * 多维组合直接在 SQL 里做，例如「13 个工厂 × 4 个会计周」：
+
+      ```sql
+      SELECT f.code AS companyCode, w.startdate, w.enddate
+      FROM factories f CROSS JOIN weeks w
+      ```
+
+    * 执行方式：**串行**，复用同一张 staging 表；某轮失败即中止后续轮次，日志标注「第 X 轮失败，后续 N 轮已中止」。
+    * 汇总：一次运行仍是一条任务实例，读取/写入行数为各轮累加，日志按 `[循环] 第 i/N 轮: {参数}` 分段。
+    * 「试算」按钮先看轮数与每轮参数，避免配错跑出几百轮；`最多循环次数` 超限会直接报错而非静默截断。
+
   * **金蝶业务错误双层拦截**：除了检查响应根节点的 `Result.ResponseStatus.IsSuccess`，还会逐格检查数据单元格——`ExecuteBillQuery` 出错时返回的是 `[[{"Result":{"ResponseStatus":{…}}}]]`，错误对象藏在数据里，不拦就会被当成一条正常记录写进临时表。
   * **过滤条件支持多字段多条件**：
     * 结构化模式逐行配置「连接符(AND/OR) · 字段 · 操作符 · 值类型 · 值」，操作符含 `= <> > >= < <= LIKE NOT LIKE IN NOT IN IS NULL IS NOT NULL`。

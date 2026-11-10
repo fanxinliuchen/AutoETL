@@ -7,7 +7,9 @@ import com.dhp.etl.core.extractor.KingdeeMetadataClient;
 import com.dhp.etl.core.extractor.RequestVarResolver;
 import com.dhp.etl.core.extractor.WebApiExtractor;
 import com.dhp.etl.core.guard.SqlSafetyGuard;
+import com.dhp.etl.core.loop.LoopDatasetService;
 import com.dhp.etl.dto.KingdeeFormFieldQueryDTO;
+import com.dhp.etl.dto.LoopEvalDTO;
 import com.dhp.etl.dto.SqlValidateDTO;
 import com.dhp.etl.dto.VarEvalDTO;
 import com.dhp.etl.entity.EtlPipeline;
@@ -34,6 +36,7 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
     private final WebApiExtractor webApiExtractor;
     private final KingdeeMetadataClient kingdeeMetadataClient;
     private final RequestVarResolver requestVarResolver;
+    private final LoopDatasetService loopDatasetService;
 
     @Override
     protected IBaseCrudService<EtlPipeline> getService() {
@@ -131,5 +134,12 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
     @PostMapping("/webapi/eval-var")
     public R<Map<String, Object>> evalVariable(@RequestBody @Valid VarEvalDTO dto) {
         return R.ok(requestVarResolver.evaluate(dto.getTargetDsId(), dto.getName(), dto.getSql()));
+    }
+
+    @Operation(summary = "循环数据集试算（返回行数与预览，不落库）")
+    @PostMapping("/webapi/eval-loop")
+    public R<Map<String, Object>> evalLoop(@RequestBody @Valid LoopEvalDTO dto) {
+        int limit = dto.getLimit() == null ? 10 : dto.getLimit();
+        return R.ok(loopDatasetService.preview(dto.getTargetDsId(), dto.getSql(), limit));
     }
 }

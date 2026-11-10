@@ -40,6 +40,15 @@ public class WebApiExtractor {
      * 抽取 WebAPI 结果数据
      */
     public List<Map<String, Object>> extract(EtlPipeline pipeline, StringBuilder logBuffer) {
+        return extract(pipeline, logBuffer, Collections.emptyMap());
+    }
+
+    /**
+     * @param loopVars 循环取数当前轮的参数（列名 -> 值），优先级高于变量定义
+     */
+    public List<Map<String, Object>> extract(EtlPipeline pipeline,
+                                             StringBuilder logBuffer,
+                                             Map<String, String> loopVars) {
         String apiUrl = pipeline.getApiUrl();
         if (StrUtil.isBlank(apiUrl)) {
             throw new BizException(ErrorCode.PARAM_ERROR, "WebAPI URL 不能为空");
@@ -68,7 +77,7 @@ public class WebApiExtractor {
         logBuffer.append(String.format("[WebAPI] 数据拉取地址: %s, 方式: %s\n", apiUrl, method));
 
         // 变量在后端解析：内置 ${today}/${yesterday}/${now}，以及过滤条件里定义的 SQL 变量
-        String requestBody = requestVarResolver.resolve(pipeline, pipeline.getApiBody(), logBuffer);
+        String requestBody = requestVarResolver.resolve(pipeline, pipeline.getApiBody(), logBuffer, loopVars);
         if (StrUtil.isNotBlank(requestBody) && !requestBody.equals(pipeline.getApiBody())) {
             logBuffer.append(String.format("[WebAPI] 变量已替换，实际请求体: %s\n", StrUtil.brief(requestBody, 300)));
         }

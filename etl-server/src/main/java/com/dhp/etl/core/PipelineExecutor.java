@@ -7,9 +7,12 @@ import com.dhp.common.exception.BizException;
 import com.dhp.common.result.ErrorCode;
 import com.dhp.etl.core.alert.AlertService;
 import com.dhp.etl.core.extractor.MySqlExtractor;
+import com.dhp.etl.core.extractor.RequestVarResolver;
 import com.dhp.etl.core.extractor.WebApiExtractor;
 import com.dhp.etl.core.guard.SqlSafetyGuard;
 import com.dhp.etl.core.loader.MySqlDwLoader;
+import com.dhp.etl.core.loop.LoopConfig;
+import com.dhp.etl.core.loop.LoopDatasetService;
 import com.dhp.etl.core.transformer.AutoInsertSqlBuilder;
 import com.dhp.etl.core.transformer.SqlTransformExecutor;
 import com.dhp.etl.entity.EtlPipeline;
@@ -29,6 +32,7 @@ import org.springframework.stereotype.Component;
 import javax.sql.DataSource;
 import java.time.LocalDateTime;
 import java.util.Date;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -48,6 +52,8 @@ public class PipelineExecutor {
     private final WebApiExtractor webApiExtractor;
     private final SqlTransformExecutor sqlTransformExecutor;
     private final AutoInsertSqlBuilder autoInsertSqlBuilder;
+    private final LoopDatasetService loopDatasetService;
+    private final RequestVarResolver requestVarResolver;
     private final MySqlDwLoader mySqlDwLoader;
     private final SqlSafetyGuard sqlSafetyGuard;
     private final AlertService alertService;
@@ -61,6 +67,8 @@ public class PipelineExecutor {
                             WebApiExtractor webApiExtractor,
                             SqlTransformExecutor sqlTransformExecutor,
                             AutoInsertSqlBuilder autoInsertSqlBuilder,
+                            LoopDatasetService loopDatasetService,
+                            RequestVarResolver requestVarResolver,
                             MySqlDwLoader mySqlDwLoader,
                             SqlSafetyGuard sqlSafetyGuard,
                             AlertService alertService,
@@ -71,6 +79,8 @@ public class PipelineExecutor {
         this.webApiExtractor = webApiExtractor;
         this.sqlTransformExecutor = sqlTransformExecutor;
         this.autoInsertSqlBuilder = autoInsertSqlBuilder;
+        this.loopDatasetService = loopDatasetService;
+        this.requestVarResolver = requestVarResolver;
         this.mySqlDwLoader = mySqlDwLoader;
         this.sqlSafetyGuard = sqlSafetyGuard;
         this.alertService = alertService;
@@ -80,7 +90,10 @@ public class PipelineExecutor {
     }
 
     /**
-     * 触发执行一个流程
+     * 触发执行一个流程。
+     *
+     * <p>配置了「循环取数」时，先执行循环数据集，再对每一行参数跑一遍完整流程。
+     * 串行执行以复用同一个 staging 表；某轮失败即中止后续轮次，避免参数有问题时批量写入半成品数据。
      */
     public void execute(Long pipelineId, TriggerTypeEnum triggerType) {
         EtlPipeline pipeline = pipelineService.getById(pipelineId);
@@ -109,6 +122,9 @@ public class PipelineExecutor {
 
         EtlTaskInstance instance = instanceService.createRunningInstance(pipeline, triggerType);
         StringBuilder logBuffer = new StringBuilder();
+        boolean looped = false;
+        int totalRounds = 1;
+        int finishedRounds = 0;
 
         try {
             runningTasks.put(pipelineId, CompletableFuture.completedFuture(null));
@@ -117,10 +133,10 @@ public class PipelineExecutor {
 
             // 临时表名提前确定：未配置转换 SQL 时，入库脚本要按它生成
             String stageTable = "stg_" + pipeline.getPipelineCode().toLowerCase();
-            // 转换 SQL 为空时走「自动直通入库」，脚本在抽取完成后按目标表结构生成
             boolean autoTransform = StrUtil.isBlank(pipeline.getTransformSql());
+            Map<String, String> columnTypes = FieldMetaResolver.parseColumnTypes(pipeline.getFieldMeta());
 
-            // 1. SQL 预检安全守卫
+            // 1. SQL 预检安全守卫（每轮不变，只做一次）
             logBuffer.append("[校验] 执行 SQL AST 安全白名单校验...\n");
             if (!autoTransform) {
                 sqlSafetyGuard.validate(pipeline.getTransformSql());
@@ -133,77 +149,61 @@ public class PipelineExecutor {
                 logBuffer.append("[校验] 未配置转换 SQL，将在抽取完成后按目标表结构自动生成入库脚本\n");
             }
 
-            // 2. 数据抽取与暂存 (Staging)
-            // 临时表列类型来自字段清单（白名单归一化，未配置的列仍为 TEXT）
-            Map<String, String> columnTypes = FieldMetaResolver.parseColumnTypes(pipeline.getFieldMeta());
-            AtomicLong readCount = new AtomicLong(0);
-
-            // 清空旧的临时表
-            mySqlDwLoader.truncateStageTable(pipeline.getTargetDsId(), stageTable);
-
-            if (pipeline.getSourceType() == SourceTypeEnum.MYSQL) {
-                if (pipeline.getSourceDsId() == null || StrUtil.isBlank(pipeline.getSourceQuerySql())) {
-                    throw new BizException(ErrorCode.PARAM_ERROR, "MySQL 源缺少数据源ID或抽取SQL");
-                }
-                DataSource srcDs = datasourceService.getDataSource(pipeline.getSourceDsId());
-                long total = mySqlExtractor.extractInBatches(
-                        srcDs,
-                        pipeline.getSourceQuerySql(),
-                        (batch, buf) -> mySqlDwLoader.batchInsertToStage(pipeline.getTargetDsId(), stageTable, batch, columnTypes, buf),
-                        logBuffer
-                );
-                readCount.set(total);
+            // 2. 展开循环参数（未启用时只有一轮空参数）
+            LoopConfig loop = LoopConfig.parse(pipeline.getFilterMeta());
+            List<Map<String, String>> rounds;
+            if (loop == null) {
+                rounds = Collections.singletonList(Collections.emptyMap());
             } else {
-                List<Map<String, Object>> apiRecords = webApiExtractor.extract(pipeline, logBuffer);
-                readCount.set(apiRecords.size());
-                if (CollUtil.isNotEmpty(apiRecords)) {
-                    mySqlDwLoader.batchInsertToStage(pipeline.getTargetDsId(), stageTable, apiRecords, columnTypes, logBuffer);
+                rounds = loopDatasetService.fetch(pipeline.getTargetDsId(), loop, logBuffer);
+                totalRounds = rounds.size();
+                looped = true;
+                logBuffer.append(String.format("[循环] 循环取数已启用，共 %d 轮，串行执行\n", totalRounds));
+            }
+
+            // 3. 逐轮执行
+            long totalRead = 0;
+            long totalWrite = 0;
+            for (int i = 0; i < rounds.size(); i++) {
+                Map<String, String> vars = rounds.get(i);
+                if (looped) {
+                    logBuffer.append(String.format("[循环] ===== 第 %d/%d 轮: %s =====\n",
+                            i + 1, totalRounds, vars));
+                }
+                long[] rw = runOnce(pipeline, instance.getId(), stageTable, autoTransform, columnTypes, logBuffer, vars);
+                totalRead += rw[0];
+                totalWrite += rw[1];
+                finishedRounds = i + 1;
+
+                if (looped && loop.getIntervalMs() > 0 && i < rounds.size() - 1) {
+                    try {
+                        Thread.sleep(loop.getIntervalMs());
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new BizException(ErrorCode.ETL_EXECUTE_ERROR, "循环执行被中断");
+                    }
                 }
             }
-            instance.setReadCount(readCount.get());
-            logBuffer.append(String.format("[暂存] 数据已成功载入临时表 %s，行数: %d\n", stageTable, readCount.get()));
 
-            // 3. 执行 SQL 转换与入库脚本 (Transform)
-            long affectedRows = 0;
-            if (autoTransform) {
-                if (readCount.get() == 0) {
-                    logBuffer.append("[处理] 未配置转换 SQL 且本次抽取 0 行，跳过入库\n");
-                } else {
-                    String autoSql = autoInsertSqlBuilder.build(pipeline, stageTable, logBuffer);
-                    logBuffer.append("[处理] 自动生成的入库脚本:\n").append(autoSql).append("\n");
-                    sqlSafetyGuard.validate(autoSql);
-                    affectedRows = sqlTransformExecutor.executeScript(
-                            pipeline.getTargetDsId(),
-                            pipeline,
-                            stageTable,
-                            instance.getId(),
-                            autoSql,
-                            logBuffer
-                    );
-                }
-            } else {
-                logBuffer.append("[处理] 正在执行 SQL 处理与入库脚本...\n");
-                affectedRows = sqlTransformExecutor.executeScript(
-                        pipeline.getTargetDsId(),
-                        pipeline,
-                        stageTable,
-                        instance.getId(),
-                        logBuffer
-                );
+            instance.setReadCount(totalRead);
+            instance.setWriteCount(totalWrite);
+            if (looped) {
+                logBuffer.append(String.format("[循环] 全部 %d 轮执行完成，累计读取 %d 行、写入 %d 行\n",
+                        totalRounds, totalRead, totalWrite));
             }
-            instance.setWriteCount(affectedRows);
-            logBuffer.append(String.format("[入库] 入库执行完成，目标受影响行数: %d\n", affectedRows));
 
-            // 4. 清空临时表 (可选清理)
-            mySqlDwLoader.truncateStageTable(pipeline.getTargetDsId(), stageTable);
-
-            // 5. 标记执行成功
+            // 4. 标记执行成功
             instance.setTaskStatus(TaskStatusEnum.SUCCESS);
             pipeline.setLastRunStatus(TaskStatusEnum.SUCCESS.getCode());
             logBuffer.append(String.format("[%s] ===== 流程执行成功结束 =====\n", LocalDateTime.now()));
 
         } catch (Exception ex) {
             log.error("[ETL] 流程执行失败: {}", pipeline.getPipelineCode(), ex);
+            if (looped && finishedRounds < totalRounds) {
+                int remaining = Math.max(totalRounds - finishedRounds - 1, 0);
+                logBuffer.append(String.format("[循环] 第 %d 轮失败，后续 %d 轮已中止（共 %d 轮）\n",
+                        finishedRounds + 1, remaining, totalRounds));
+            }
             instance.setTaskStatus(TaskStatusEnum.FAILED);
             instance.setErrorMessage(StrUtil.sub(ex.getMessage(), 0, 2000));
             pipeline.setLastRunStatus(TaskStatusEnum.FAILED.getCode());
@@ -234,6 +234,80 @@ public class PipelineExecutor {
             pipeline.setLastRunTime(end);
             pipelineService.updateById(pipeline);
         }
+    }
+
+    /**
+     * 执行一轮完整流程：抽取 → 暂存 → 转换入库 → 清理临时表
+     *
+     * @param loopVars 循环取数当前轮的参数（列名 -> 值），为空表示非循环
+     * @return {读取行数, 写入行数}
+     */
+    private long[] runOnce(EtlPipeline pipeline,
+                           Long instanceId,
+                           String stageTable,
+                           boolean autoTransform,
+                           Map<String, String> columnTypes,
+                           StringBuilder logBuffer,
+                           Map<String, String> loopVars) throws Exception {
+        // 清空旧的临时表
+        mySqlDwLoader.truncateStageTable(pipeline.getTargetDsId(), stageTable);
+
+        long readCount;
+        if (pipeline.getSourceType() == SourceTypeEnum.MYSQL) {
+            if (pipeline.getSourceDsId() == null || StrUtil.isBlank(pipeline.getSourceQuerySql())) {
+                throw new BizException(ErrorCode.PARAM_ERROR, "MySQL 源缺少数据源ID或抽取SQL");
+            }
+            DataSource srcDs = datasourceService.getDataSource(pipeline.getSourceDsId());
+            // 源 SQL 同样支持变量：循环时每轮取不同的时间区间
+            String sourceSql = requestVarResolver.resolve(pipeline, pipeline.getSourceQuerySql(), logBuffer, loopVars);
+            readCount = mySqlExtractor.extractInBatches(
+                    srcDs,
+                    sourceSql,
+                    (batch, buf) -> mySqlDwLoader.batchInsertToStage(pipeline.getTargetDsId(), stageTable, batch, columnTypes, buf),
+                    logBuffer
+            );
+        } else {
+            List<Map<String, Object>> apiRecords = webApiExtractor.extract(pipeline, logBuffer, loopVars);
+            readCount = apiRecords.size();
+            if (CollUtil.isNotEmpty(apiRecords)) {
+                mySqlDwLoader.batchInsertToStage(pipeline.getTargetDsId(), stageTable, apiRecords, columnTypes, logBuffer);
+            }
+        }
+        logBuffer.append(String.format("[暂存] 数据已成功载入临时表 %s，行数: %d\n", stageTable, readCount));
+
+        // 转换与入库
+        long affectedRows = 0;
+        if (autoTransform) {
+            if (readCount == 0) {
+                logBuffer.append("[处理] 未配置转换 SQL 且本次抽取 0 行，跳过入库\n");
+            } else {
+                String autoSql = autoInsertSqlBuilder.build(pipeline, stageTable, logBuffer);
+                logBuffer.append("[处理] 自动生成的入库脚本:\n").append(autoSql).append("\n");
+                sqlSafetyGuard.validate(autoSql);
+                affectedRows = sqlTransformExecutor.executeScript(
+                        pipeline.getTargetDsId(),
+                        pipeline,
+                        stageTable,
+                        instanceId,
+                        autoSql,
+                        logBuffer
+                );
+            }
+        } else {
+            logBuffer.append("[处理] 正在执行 SQL 处理与入库脚本...\n");
+            affectedRows = sqlTransformExecutor.executeScript(
+                    pipeline.getTargetDsId(),
+                    pipeline,
+                    stageTable,
+                    instanceId,
+                    logBuffer
+            );
+        }
+        logBuffer.append(String.format("[入库] 入库执行完成，目标受影响行数: %d\n", affectedRows));
+
+        // 清空临时表
+        mySqlDwLoader.truncateStageTable(pipeline.getTargetDsId(), stageTable);
+        return new long[]{readCount, affectedRows};
     }
 
     /**

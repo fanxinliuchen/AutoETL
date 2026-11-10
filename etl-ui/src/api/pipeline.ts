@@ -98,6 +98,21 @@ export interface VarEvalResult {
   elapsedMs: number
 }
 
+export interface LoopEvalResult {
+  columns: string[]
+  rowCount: number
+  rows: Record<string, string>[]
+}
+
+/** 循环数据集试算：返回行数与预览，不落库 */
+export function evaluateLoop(data: {
+  targetDsId: number | string
+  sql: string
+  limit?: number
+}): Promise<LoopEvalResult> {
+  return request.post('/etl/pipeline/webapi/eval-loop', data)
+}
+
 /** 变量 SQL 试算：在目标数据源上执行一次取值表达式，不落库 */
 export function evaluateVariable(data: {
   // 雪花 ID 超出 JS 安全整数范围，必须按字符串传，避免精度丢失

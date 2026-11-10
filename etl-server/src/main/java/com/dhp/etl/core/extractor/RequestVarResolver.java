@@ -89,14 +89,27 @@ public class RequestVarResolver {
      * @param logBuffer 执行日志
      */
     public String resolve(EtlPipeline pipeline, String text, StringBuilder logBuffer) {
+        return resolve(pipeline, text, logBuffer, Collections.emptyMap());
+    }
+
+    /**
+     * @param loopVars 循环取数注入的变量（列名 -> 值），优先级最高，会覆盖变量定义里的同名项
+     */
+    public String resolve(EtlPipeline pipeline,
+                          String text,
+                          StringBuilder logBuffer,
+                          Map<String, String> loopVars) {
         if (StrUtil.isBlank(text) || !text.contains("${")) {
             return text;
         }
+        Map<String, String> external = loopVars == null ? Collections.emptyMap() : loopVars;
 
         Map<String, String> values = builtinVariables();
+        values.putAll(external);
+
         List<VarDef> defs = parseDefinitions(pipeline.getFilterMeta());
 
-        // 只执行真正被引用到的变量，避免无谓查询
+        // 只执行真正被引用、且没有被循环变量覆盖的变量，避免无谓查询
         Set<String> used = new LinkedHashSet<>();
         Matcher matcher = VAR_PATTERN.matcher(text);
         while (matcher.find()) {
@@ -104,7 +117,9 @@ public class RequestVarResolver {
         }
         List<VarDef> needed = new ArrayList<>();
         for (VarDef def : defs) {
-            if (used.contains(def.getName())) {
+            boolean coveredByLoop = external.keySet().stream()
+                    .anyMatch(k -> k.equalsIgnoreCase(def.getName()));
+            if (used.contains(def.getName()) && !coveredByLoop) {
                 needed.add(def);
             }
         }
@@ -259,7 +274,7 @@ public class RequestVarResolver {
         validateSql(def.getName(), def.getSql());
     }
 
-    static void validateSql(String name, String sql) {
+    public static void validateSql(String name, String sql) {
         if (StrUtil.isBlank(sql)) {
             throw new BizException(ErrorCode.PARAM_ERROR, "变量 " + name + " 的 SQL 表达式不能为空");
         }
@@ -288,6 +303,15 @@ public class RequestVarResolver {
         while (matcher.find()) {
             String name = matcher.group(1).trim();
             String value = values.get(name);
+            if (value == null) {
+                // 列名大小写常与引用写法不一致（如 SQL 列 startdate、写法 ${STARTDATE}），做一次忽略大小写匹配
+                for (Map.Entry<String, String> entry : values.entrySet()) {
+                    if (entry.getKey().equalsIgnoreCase(name)) {
+                        value = entry.getValue();
+                        break;
+                    }
+                }
+            }
             if (value == null) {
                 missing.add(name);
                 value = matcher.group(0);
