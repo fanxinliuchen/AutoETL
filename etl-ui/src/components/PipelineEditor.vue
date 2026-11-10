@@ -1043,15 +1043,24 @@
                       <a-col :span="24">
                         <a-form-item label="请求体 Body (JSON 格式完整结构)">
                           <template #extra>
-                            <span class="field-hint">系统已根据上方字段自动同步为金蝶标准 JSON 结构，支持在此自由微调扩展参数</span>
+                            <span class="field-hint">
+                              系统已根据上方字段自动同步为金蝶标准 JSON 结构，支持在此自由微调扩展参数
+                            </span>
                           </template>
                           <a-textarea
                             v-model:value="formData.apiBody"
                             :rows="7"
                             class="code-textarea"
                             :placeholder="bodyPlaceholder"
-                            @change="syncBodyToKingdeeQuery"
+                            @change="onBodyEdited"
                           />
+                          <div v-if="bodyShape === 'UNKNOWN'" class="body-warn">
+                            当前报文既不是「标准查询」也不是「报表方案」结构（JSON
+                            可能语法有误）：保存时将<b>按原文提交</b>，不会用上方的 FormId / 字段覆盖它。
+                          </div>
+                          <div v-else-if="bodyManual" class="body-note">
+                            已手工编辑请求体：保存以此处文本为准，上方字段仅用于展示与解析。
+                          </div>
                         </a-form-item>
                       </a-col>
                     </a-row>
@@ -2014,6 +2023,15 @@ type BodyMode = 'STANDARD' | 'REPORT'
 // 报表方案：{"parameters":[{"FORMID":...,"FSCHEMEID":...,"QuicklyCondition":[...]}]}
 const bodyMode = ref<BodyMode>('STANDARD')
 
+// 报文结构识别结果：UNKNOWN 表示既不是标准查询也不是报表方案（例如手工粘贴的自定义报文）
+type BodyShape = BodyMode | 'UNKNOWN'
+
+// 请求体是否被用户手工改过。为 true 时保存以文本原文为准，
+// 不再用向导里的 FormId / 字段重新生成，避免"保存后配置被还原成旧值"
+const bodyManual = ref(false)
+// 保存时对报文的提示（例如结构无法识别时按原文提交）
+const bodySaveWarning = ref('')
+
 // 报表方案的过滤方案 ID
 const schemeId = ref('')
 
@@ -2898,6 +2916,8 @@ const syncKingdeeLoginBody = () => {
 
 // 同步金蝶单据参数至 Body
 const syncKingdeeQueryToBody = () => {
+  // 由向导字段重建报文，视为系统生成，保存时不再保留手工原文
+  bodyManual.value = false
   if (bodyMode.value === 'REPORT') {
     // 报表方案查询：过滤条件走 QuicklyCondition 数组，没有 FilterString / OrderString
     formData.value.apiBody = JSON.stringify(
@@ -3162,35 +3182,88 @@ const confirmPasteImport = () => {
   pasteText.value = ''
 }
 
-// 从 Body 反向解析金蝶单据参数
-const syncBodyToKingdeeQuery = () => {
+// 判断报文属于哪种取数方式：标准查询 / 报表方案 / 无法识别
+// 识别不出来的报文（例如手工拼的报文）绝不会被向导字段覆盖，保存时按原文提交
+const detectBodyShape = (text: string): BodyShape => {
+  if (!text || !text.trim()) return 'UNKNOWN'
+  let parsed: any
   try {
-    if (!formData.value.apiBody) return
-    const parsed = JSON.parse(formData.value.apiBody)
+    parsed = JSON.parse(text)
+  } catch (e) {
+    return 'UNKNOWN'
+  }
+  const root = Array.isArray(parsed) ? parsed[0] : parsed
+  if (!root || typeof root !== 'object') return 'UNKNOWN'
 
-    // 报表方案查询：parameters[0] + QuicklyCondition
-    if (Array.isArray(parsed.parameters) && parsed.parameters[0]) {
-      const p = parsed.parameters[0]
-      bodyMode.value = 'REPORT'
-      if (p.FORMID) kingdeeQuery.value.formId = p.FORMID
-      if (p.FSCHEMEID !== undefined) schemeId.value = p.FSCHEMEID
-      if (p.FieldKeys) kingdeeQuery.value.fieldKeys = p.FieldKeys
-      if (p.Limit !== undefined) kingdeeQuery.value.limit = p.Limit
-      const conditions = Array.isArray(p.QuicklyCondition) ? p.QuicklyCondition : []
-      quickConditions.value = conditions.map((c: any) => ({
-        rid: `qc_${++quickRidSeed}`,
-        fieldName: String(c?.FieldName ?? ''),
-        fieldValue: String(c?.FieldValue ?? '')
-      }))
-      rebuildFieldRows()
-      loadFilter(true)
-      loadSyncConfig()
-      return
-    }
+  // 报表方案：{"parameters":[{FORMID,...}]}，也兼容 parameters 为单个对象或直接给一条参数
+  const paramItem = Array.isArray(root.parameters)
+    ? root.parameters[0]
+    : root.parameters && typeof root.parameters === 'object'
+      ? root.parameters
+      : null
+  if (paramItem && (paramItem.FORMID || paramItem.FSCHEMEID || paramItem.QuicklyCondition)) {
+    return 'REPORT'
+  }
+  if (root.FORMID || root.FSCHEMEID || root.QuicklyCondition) return 'REPORT'
 
-    // 标准查询：data / 根节点
+  // 标准查询：{"data":{FormId,...}} 或根节点就是 {FormId,...}
+  const d = root.data && typeof root.data === 'object' ? root.data : root
+  if (d.FormId || d.FieldKeys || d.FilterString !== undefined) return 'STANDARD'
+
+  return 'UNKNOWN'
+}
+
+// 当前请求体的结构（用于界面提示）
+const bodyShape = computed<BodyShape | ''>(() =>
+  formData.value.apiBody?.trim() ? detectBodyShape(formData.value.apiBody) : ''
+)
+
+// 用户直接编辑请求体：以文本为准，打上手工标记
+const onBodyEdited = () => {
+  bodyManual.value = true
+  syncBodyToKingdeeQuery()
+}
+
+// 从 Body 反向解析金蝶单据参数，返回识别到的报文结构
+const syncBodyToKingdeeQuery = (): BodyShape => {
+  if (!formData.value.apiBody?.trim()) return 'UNKNOWN'
+  let parsed: any
+  try {
+    parsed = JSON.parse(formData.value.apiBody)
+  } catch (e) {
+    return 'UNKNOWN'
+  }
+  const root = Array.isArray(parsed) ? parsed[0] : parsed
+  if (!root || typeof root !== 'object') return 'UNKNOWN'
+
+  const paramItem = Array.isArray(root.parameters)
+    ? root.parameters[0]
+    : root.parameters && typeof root.parameters === 'object'
+      ? root.parameters
+      : null
+  const p = paramItem || (root.FORMID || root.FSCHEMEID || root.QuicklyCondition ? root : null)
+
+  if (p) {
+    bodyMode.value = 'REPORT'
+    if (p.FORMID) kingdeeQuery.value.formId = p.FORMID
+    if (p.FSCHEMEID !== undefined) schemeId.value = p.FSCHEMEID
+    if (p.FieldKeys) kingdeeQuery.value.fieldKeys = p.FieldKeys
+    if (p.Limit !== undefined) kingdeeQuery.value.limit = p.Limit
+    const conditions = Array.isArray(p.QuicklyCondition) ? p.QuicklyCondition : []
+    quickConditions.value = conditions.map((c: any) => ({
+      rid: `qc_${++quickRidSeed}`,
+      fieldName: String(c?.FieldName ?? ''),
+      fieldValue: String(c?.FieldValue ?? '')
+    }))
+    rebuildFieldRows()
+    loadFilter(true)
+    loadSyncConfig()
+    return 'REPORT'
+  }
+
+  const d = root.data && typeof root.data === 'object' ? root.data : root
+  if (d.FormId || d.FieldKeys || d.FilterString !== undefined) {
     bodyMode.value = 'STANDARD'
-    const d = parsed.data || parsed
     if (d.FormId) kingdeeQuery.value.formId = d.FormId
     if (d.FieldKeys) kingdeeQuery.value.fieldKeys = d.FieldKeys
     if (d.FilterString !== undefined) kingdeeQuery.value.filterString = d.FilterString
@@ -3199,7 +3272,10 @@ const syncBodyToKingdeeQuery = () => {
     rebuildFieldRows()
     loadFilter(true)
     loadSyncConfig()
-  } catch (e) {}
+    return 'STANDARD'
+  }
+
+  return 'UNKNOWN'
 }
 
 // 载入金蝶登录认证标准模板
@@ -3506,8 +3582,15 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
       await loadCredentialSilently()
     }
 
+    // 已保存的报文若无法识别结构（用户自定义报文），标记为手工内容，
+    // 之后保存时按原文提交，不能被向导字段重置
+    bodyManual.value = false
+    bodySaveWarning.value = ''
     if (record.apiBody) {
-      syncBodyToKingdeeQuery()
+      const shape = syncBodyToKingdeeQuery()
+      if (shape === 'UNKNOWN' && record.apiBody.trim().startsWith('{')) {
+        bodyManual.value = true
+      }
     } else {
       fieldRows.value = []
     }
@@ -3561,10 +3644,22 @@ const handleReset = () => {
 }
 
 const prepareDataBeforeSave = () => {
+  bodySaveWarning.value = ''
   if (formData.value.sourceType === 'WEB_API') {
     if (formData.value.apiAuthType === 'KINGDEE_K3') {
       syncKingdeeLoginBody()
-      syncKingdeeQueryToBody()
+      // 请求体优先用户手改的原文：结构识别不出来时绝不回写向导字段，
+      // 否则会把粘贴进来的第二种报文（parameters 等）覆盖回旧的 data 报文
+      const rawBody = formData.value.apiBody?.trim() || ''
+      if (bodyManual.value && rawBody) {
+        const shape = detectBodyShape(rawBody)
+        if (shape === 'UNKNOWN') {
+          bodySaveWarning.value =
+            '请求体不是可识别的金蝶报文结构，已按原文保存；上方 FormId / 字段未写入该报文'
+        }
+      } else {
+        syncKingdeeQueryToBody()
+      }
     } else if (formData.value.apiAuthType === 'CUSTOM_LOGIN') {
       formData.value.apiAuthConfig = JSON.stringify(customAuthConfig.value)
     } else {
@@ -3590,9 +3685,10 @@ const handleSaveStep = async (silent = false): Promise<boolean> => {
     return false
   }
 
-  prepareDataBeforeSave()
   submitting.value = true
   try {
+    // 放进 try：整理数据时抛错也能给出提示，而不是"点了没反应"
+    prepareDataBeforeSave()
     const payload: Partial<EtlPipeline> = {
       ...formData.value,
       id: currentId.value ? currentId.value : undefined
@@ -3604,7 +3700,9 @@ const handleSaveStep = async (silent = false): Promise<boolean> => {
       formData.value.pipelineCode = saved.pipelineCode
       isEdit.value = true
     }
-    if (!silent) {
+    if (bodySaveWarning.value) {
+      message.warning(bodySaveWarning.value)
+    } else if (!silent) {
       message.success('当前配置进度已暂存保存！可随时返回列表或下次继续配置')
     }
     return true
@@ -3645,15 +3743,19 @@ const handleCompleteSave = async () => {
     return
   }
 
-  prepareDataBeforeSave()
   submitting.value = true
   try {
+    prepareDataBeforeSave()
     const payload: Partial<EtlPipeline> = {
       ...formData.value,
       id: currentId.value ? currentId.value : undefined
     }
     await saveStepPipeline(payload)
-    message.success('ETL 流程全部配置已成功保存！')
+    if (bodySaveWarning.value) {
+      message.warning(bodySaveWarning.value)
+    } else {
+      message.success('ETL 流程全部配置已成功保存！')
+    }
     emit('success')
   } catch (e: any) {
     message.error('保存失败：' + (e.message || '系统异常'))
@@ -3903,6 +4005,25 @@ defineExpose({ open })
   line-height: 1.6;
 }
 
+/* 请求体手工编辑 / 结构无法识别时的提示 */
+.body-warn {
+  margin-top: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #ad4e00;
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+  border-radius: 4px;
+}
+
+.body-note {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #1677ff;
+}
+
 .fk-input-mono :deep(input) {
   font-family: Consolas, Monaco, monospace;
 }
@@ -4079,7 +4200,7 @@ defineExpose({ open })
 }
 
 .loop-box {
-  margin-top: 4px;
+  margin: 4px 0 16px;
   padding: 10px 12px 4px;
   background: #fff;
   border: 1px dashed #e8d5b7;
