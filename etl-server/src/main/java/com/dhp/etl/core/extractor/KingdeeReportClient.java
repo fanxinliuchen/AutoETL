@@ -63,12 +63,7 @@ public class KingdeeReportClient {
         JSONObject param = new JSONObject();
         param.set("FORMID", dto.getFormId().trim());
         param.set("FSCHEMEID", dto.getSchemeId().trim());
-        param.set("QuicklyCondition", dto.getQuicklyConditions() == null
-                ? new JSONArray() : JSONUtil.parseArray(dto.getQuicklyConditions()));
-        // 传了条件就带上，否则按方案的默认条件试取
-        if (dto.getMoreConditions() != null && !dto.getMoreConditions().isEmpty()) {
-            param.set("MoreCondition", JSONUtil.parseArray(dto.getMoreConditions()));
-        }
+        param.set("QuicklyCondition", new JSONArray());
         param.set("StartRow", 0);
         // 只取 1 行：既够推断列名，又不会把整张报表拉下来
         param.set("Limit", 1);
@@ -108,10 +103,8 @@ public class KingdeeReportClient {
         }
         String trimmed = responseBody.trim();
         if (!trimmed.startsWith("{")) {
-            // 金蝶的纯文本错误里常带 &#39; 之类转义，先还原再展示
             throw new BizException(ErrorCode.PARAM_ERROR,
-                    "金蝶报表接口返回异常（请检查接口地址与参数）："
-                            + StrUtil.brief(cn.hutool.http.HtmlUtil.unescape(responseBody), 200));
+                    "金蝶报表接口返回异常（请检查接口地址与参数）：" + StrUtil.brief(responseBody, 200));
         }
 
         JSONObject root;

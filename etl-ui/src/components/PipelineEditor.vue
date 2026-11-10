@@ -689,10 +689,10 @@
                     <!-- 报表方案：查询条件 QuicklyCondition -->
                     <a-row :gutter="16" v-if="bodyMode === 'REPORT'">
                       <a-col :span="24">
-                        <a-form-item label="查询条件 (QuicklyCondition / MoreCondition)">
+                        <a-form-item label="查询条件 (QuicklyCondition)">
                           <div class="fk-toolbar">
                             <span class="fk-count">
-                              {{ quickConditions.length }} 个条件 · 字段 / 操作符 / 值类型 / 值
+                              {{ quickConditions.length }} 个条件 · 每行为 FieldName = FieldValue
                             </span>
                             <a-button size="small" @click="addQuickCondition">
                               <plus-outlined /> 添加条件
@@ -765,64 +765,24 @@
                       </div>
 
                       <div v-for="(row, index) in quickConditions" :key="row.rid" class="filt-row">
-                        <a-select
-                          v-if="index > 0"
-                          v-model:value="row.connector"
-                          size="small"
-                          style="width: 78px; flex: none"
-                          :options="[
-                            { label: 'AND', value: 'AND' },
-                            { label: 'OR', value: 'OR' }
-                          ]"
-                          @change="syncKingdeeQueryToBody"
-                        />
-                        <span v-else class="filt-where">WHERE</span>
                         <a-auto-complete
                           v-model:value="row.fieldName"
                           size="small"
                           class="fk-input-mono"
                           :options="filterFieldOptions"
                           placeholder="条件字段，如 BeginDate"
-                          style="flex: 1; min-width: 190px"
+                          style="flex: 1; min-width: 200px"
                           @change="syncKingdeeQueryToBody"
                         />
-                        <a-select
-                          v-model:value="row.op"
+                        <span class="filt-where">=</span>
+                        <a-input
+                          v-model:value="row.fieldValue"
                           size="small"
-                          style="width: 110px; flex: none"
-                          :options="REPORT_OPS.map((o) => ({ label: o, value: o }))"
+                          class="fk-input-mono"
+                          placeholder="值：变量写 ${NAME}，文本直接填"
+                          style="flex: 1; min-width: 200px"
                           @change="syncKingdeeQueryToBody"
                         />
-                        <template v-if="needsFilterValue(row.op)">
-                          <a-select
-                            v-model:value="row.valueType"
-                            size="small"
-                            style="width: 104px; flex: none"
-                            :options="FILTER_VALUE_TYPES"
-                            @change="syncKingdeeQueryToBody"
-                          />
-                          <a-auto-complete
-                            v-if="row.valueType === 'VARIABLE'"
-                            v-model:value="row.value"
-                            size="small"
-                            class="fk-input-mono"
-                            :options="variableOptions"
-                            placeholder="选择变量名，如 startdate"
-                            style="flex: 1; min-width: 160px"
-                            @change="syncKingdeeQueryToBody"
-                          />
-                          <a-input
-                            v-else
-                            v-model:value="row.value"
-                            size="small"
-                            style="flex: 1; min-width: 150px"
-                            :placeholder="
-                              row.valueType === 'RAW' ? '原始值，如 0' : '条件值'
-                            "
-                            @change="syncKingdeeQueryToBody"
-                          />
-                        </template>
-                        <div v-else style="flex: 1"></div>
                         <a-button
                           size="small"
                           type="link"
@@ -838,10 +798,6 @@
                       </div>
                       <div class="filt-preview">
                         生成：<code>{{ quickConditionPreview || '（空）' }}</code>
-                      </div>
-                      <div class="fk-hint">
-                        「=」按快捷过滤（QuicklyCondition）提交，「&gt; &lt; LIKE」等比较条件按高级条件（MoreCondition）提交；
-                        两处字段取自报表过滤框的不同页签，字段名要填对应页签里的绑定属性。
                       </div>
                     </div>
 
@@ -2143,30 +2099,16 @@ const schemeId = ref('')
 
 interface QuickCondition {
   rid: string
-  connector: 'AND' | 'OR'
   fieldName: string
-  op: string
-  valueType: FilterValueType
-  value: string
+  fieldValue: string
 }
-
-// 报表过滤框有快捷过滤和条件/高级两个页签：
-// 「=」按快捷过滤（QuicklyCondition）提交，其余比较符按高级条件（MoreCondition）提交
-const REPORT_OPS = ['=', '<>', '>', '>=', '<', '<=', 'LIKE', 'NOT LIKE', 'IS NULL', 'IS NOT NULL']
 
 let quickRidSeed = 0
 const quickConditions = ref<QuickCondition[]>([])
 
 const defaultQuickCondition = (): QuickCondition => {
   quickRidSeed += 1
-  return {
-    rid: `qc_${quickRidSeed}`,
-    connector: 'AND',
-    fieldName: '',
-    op: '=',
-    valueType: 'TEXT',
-    value: ''
-  }
+  return { rid: `qc_${quickRidSeed}`, fieldName: '', fieldValue: '' }
 }
 
 const addQuickCondition = () => {
@@ -2177,29 +2119,6 @@ const addQuickCondition = () => {
 const removeQuickCondition = (index: number) => {
   quickConditions.value.splice(index, 1)
   syncKingdeeQueryToBody()
-}
-
-// 条件值：变量统一成 ${name}，文本/数字/原始表达式原样提交（金蝶报表过滤值不带引号）
-const renderQuickValue = (row: QuickCondition) =>
-  row.valueType === 'VARIABLE' ? variableRef(row.value) : row.value.trim()
-
-// 拆成金蝶要的两个数组：等值走 QuicklyCondition，比较符走 MoreCondition
-const buildReportConditions = () => {
-  const rows = quickConditions.value.filter((r) => r.fieldName.trim())
-  const quick = rows
-    .filter((r) => r.op === '=')
-    .map((r) => ({ FieldName: r.fieldName.trim(), FieldValue: renderQuickValue(r) }))
-  const more = rows
-    .filter((r) => r.op !== '=')
-    .map((r) => ({
-      Left: '',
-      FieldName: r.fieldName.trim(),
-      Compare: r.op,
-      FieldValue: needsFilterValue(r.op) ? renderQuickValue(r) : '',
-      Right: '',
-      Logic: r.connector
-    }))
-  return { quick, more }
 }
 
 // 手动切换取数方式：记住选择并重建报文模板；手动选定后不再被自动识别覆盖
@@ -2292,17 +2211,12 @@ const fixReportUrl = () => {
 }
 
 // 报表模式的条件预览
-const quickConditionPreview = computed(() => {
-  const rows = quickConditions.value.filter((c) => c.fieldName.trim())
-  return rows
-    .map((c, i) => {
-      const expr = needsFilterValue(c.op)
-        ? `${c.fieldName.trim()} ${c.op} ${renderQuickValue(c) || '?'}`
-        : `${c.fieldName.trim()} ${c.op}`
-      return i === 0 ? expr : `${c.connector} ${expr}`
-    })
-    .join(' ')
-})
+const quickConditionPreview = computed(() =>
+  quickConditions.value
+    .filter((c) => c.fieldName.trim())
+    .map((c) => `${c.fieldName.trim()} = ${c.fieldValue}`)
+    .join(' AND ')
+)
 
 // ===== 高级配置：分页取数（对应 t_etl_pipeline.api_pagination） =====
 const defaultPagination = () => ({
@@ -3163,21 +3077,25 @@ const syncKingdeeQueryToBody = () => {
   // 由向导字段重建报文，视为系统生成，保存时不再保留手工原文
   bodyManual.value = false
   if (bodyMode.value === 'REPORT') {
-    // 报表方案查询：等值条件走 QuicklyCondition，比较条件走 MoreCondition；没有 FilterString / OrderString
-    const { quick, more } = buildReportConditions()
-    const param: Record<string, unknown> = {
-      FORMID: kingdeeQuery.value.formId || '',
-      FSCHEMEID: schemeId.value || '',
-      QuicklyCondition: quick
-    }
-    // 空数组不写，避免改变历史报文结构
-    if (more.length) {
-      param.MoreCondition = more
-    }
-    param.StartRow = 0
-    param.Limit = kingdeeQuery.value.limit || 2000
-    param.FieldKeys = kingdeeQuery.value.fieldKeys || ''
-    formData.value.apiBody = JSON.stringify({ parameters: [param] }, null, 2)
+    // 报表方案查询：过滤条件走 QuicklyCondition 数组，没有 FilterString / OrderString
+    formData.value.apiBody = JSON.stringify(
+      {
+        parameters: [
+          {
+            FORMID: kingdeeQuery.value.formId || '',
+            FSCHEMEID: schemeId.value || '',
+            QuicklyCondition: quickConditions.value
+              .filter((c) => c.fieldName.trim())
+              .map((c) => ({ FieldName: c.fieldName.trim(), FieldValue: c.fieldValue })),
+            StartRow: 0,
+            Limit: kingdeeQuery.value.limit || 2000,
+            FieldKeys: kingdeeQuery.value.fieldKeys || ''
+          }
+        ]
+      },
+      null,
+      2
+    )
   } else {
     formData.value.apiBody = JSON.stringify(
       {
@@ -3387,7 +3305,6 @@ const handleDetectReportFields = async () => {
   }
   reportFieldsLoading.value = true
   try {
-    const { quick, more } = buildReportConditions()
     const res = await detectKingdeeReportFields({
       loginUrl: kingdeeConfig.value.loginUrl,
       acctID: kingdeeConfig.value.acctID,
@@ -3396,10 +3313,7 @@ const handleDetectReportFields = async () => {
       lcid: kingdeeConfig.value.lcid,
       formId,
       schemeId: schemeId.value.trim(),
-      reportUrl: formData.value.apiUrl?.trim() || undefined,
-      // 带上当前条件：方案要靠日期/组织才能出数时，空条件下必然查不到行
-      quicklyConditions: quick,
-      moreConditions: more
+      reportUrl: formData.value.apiUrl?.trim() || undefined
     })
     if (!res?.fields?.length) {
       message.warning(res?.message || '未能从报表结果推断出字段')
@@ -3567,25 +3481,12 @@ const syncBodyToKingdeeQuery = (): BodyShape => {
     if (p.FSCHEMEID !== undefined) schemeId.value = p.FSCHEMEID
     if (p.FieldKeys) kingdeeQuery.value.fieldKeys = p.FieldKeys
     if (p.Limit !== undefined) kingdeeQuery.value.limit = p.Limit
-    // 等值条件在 QuicklyCondition，比较条件在 MoreCondition，统一还原成同一张表
-    const rows: QuickCondition[] = []
-    const pushRow = (c: any, op: string) => {
-      const raw = String(c?.FieldValue ?? '').trim()
-      const varMatch = raw.match(/^\$\{([^}]+)\}$/)
-      rows.push({
-        rid: `qc_${++quickRidSeed}`,
-        connector: c?.Logic === 'OR' ? 'OR' : 'AND',
-        fieldName: String(c?.FieldName ?? ''),
-        op,
-        valueType: varMatch ? 'VARIABLE' : 'TEXT',
-        value: varMatch ? varMatch[1] : String(c?.FieldValue ?? '')
-      })
-    }
-    ;(Array.isArray(p.QuicklyCondition) ? p.QuicklyCondition : []).forEach((c: any) => pushRow(c, '='))
-    ;(Array.isArray(p.MoreCondition) ? p.MoreCondition : []).forEach((c: any) =>
-      pushRow(c, String(c?.Compare || '='))
-    )
-    quickConditions.value = rows
+    const conditions = Array.isArray(p.QuicklyCondition) ? p.QuicklyCondition : []
+    quickConditions.value = conditions.map((c: any) => ({
+      rid: `qc_${++quickRidSeed}`,
+      fieldName: String(c?.FieldName ?? ''),
+      fieldValue: String(c?.FieldValue ?? '')
+    }))
     rebuildFieldRows()
     loadFilter(true)
     loadSyncConfig()
