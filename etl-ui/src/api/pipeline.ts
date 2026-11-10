@@ -64,7 +64,8 @@ export function queryKingdeeFormFields(data: {
   lcid?: number
   formId: string
 }): Promise<KingdeeFieldMeta[]> {
-  return request.post('/etl/pipeline/webapi/form-fields', data)
+  // 失败原因在「从金蝶拉取字段」弹窗内就地展示，这里不再弹全局提示
+  return request.post('/etl/pipeline/webapi/form-fields', data, { silent: true })
 }
 
 export interface KingdeeCredentialMasked {
@@ -120,7 +121,8 @@ export function evaluateVariable(data: {
   name?: string
   sql: string
 }): Promise<VarEvalResult> {
-  return request.post('/etl/pipeline/webapi/eval-var', data)
+  // 试算失败时在变量行下方就地显示红色原因，不再叠加全局提示
+  return request.post('/etl/pipeline/webapi/eval-var', data, { silent: true })
 }
 
 // ===== 目标表结构 =====
