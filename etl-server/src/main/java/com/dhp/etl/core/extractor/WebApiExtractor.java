@@ -112,6 +112,11 @@ public class WebApiExtractor {
             throw new BizException(ErrorCode.PARAM_ERROR, "分页取数要求请求体为合法 JSON: " + e.getMessage());
         }
 
+        // 金蝶两种报文的分页字段位置不同，按报文体自动切换路径
+        pagination.adaptToRequestBody(baseBody);
+        logBuffer.append(String.format("[WebAPI-分页] 分页字段路径: 偏移=%s, 每页=%s\n",
+                pagination.getOffsetPath(), pagination.getLimitPath()));
+
         List<String> fieldKeys = parseFieldKeysFromRequestBody(requestBody);
         List<Map<String, Object>> all = new ArrayList<>();
 
@@ -163,6 +168,75 @@ public class WebApiExtractor {
     }
 
     /**
+     * 逐格检查金蝶业务错误（错误对象可能作为单元格值返回）
+     */
+    private void assertNoCellBusinessError(List<Map<String, Object>> records) {
+        for (Map<String, Object> row : records) {
+            if (row.containsKey("Result")) {
+                checkErrorNode(row.get("Result"));
+            }
+            for (Object value : row.values()) {
+                if (value instanceof Map<?, ?> cell) {
+                    checkErrorNode(cell);
+                }
+            }
+        }
+    }
+
+    private void checkErrorNode(Object node) {
+        Map<?, ?> statusMap = findResponseStatus(node);
+        if (statusMap == null) {
+            return;
+        }
+        if (!Boolean.FALSE.equals(statusMap.get("IsSuccess"))) {
+            return;
+        }
+        String detail = extractErrorMessages(statusMap.get("Errors"));
+        throw new BizException(ErrorCode.ETL_EXECUTE_ERROR,
+                "金蝶返回业务错误: " + (StrUtil.isBlank(detail) ? "未知业务错误" : detail));
+    }
+
+    /**
+     * 找 ResponseStatus 节点：既支持直接挂载，也支持套一层 Result
+     */
+    private Map<?, ?> findResponseStatus(Object node) {
+        if (!(node instanceof Map<?, ?> map)) {
+            return null;
+        }
+        Object direct = map.get("ResponseStatus");
+        if (direct instanceof Map<?, ?> directMap) {
+            return directMap;
+        }
+        Object result = map.get("Result");
+        if (result instanceof Map<?, ?> resultMap) {
+            Object inner = resultMap.get("ResponseStatus");
+            if (inner instanceof Map<?, ?> innerMap) {
+                return innerMap;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 从 Errors 数组里提取可读消息
+     */
+    private String extractErrorMessages(Object errors) {
+        if (!(errors instanceof List<?> list)) {
+            return null;
+        }
+        StringBuilder message = new StringBuilder();
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> err) {
+                Object msg = err.get("Message");
+                if (msg != null && StrUtil.isNotBlank(String.valueOf(msg))) {
+                    message.append(message.length() > 0 ? "；" : "").append(msg);
+                }
+            }
+        }
+        return message.length() == 0 ? null : message.toString();
+    }
+
+    /**
      * 识别金蝶业务层错误。
      *
      * <p>金蝶在参数错误（如字段名不存在）时仍返回 HTTP 200，只是把
@@ -188,22 +262,9 @@ public class WebApiExtractor {
             if (status == null || !Boolean.FALSE.equals(status.getBool("IsSuccess"))) {
                 return;
             }
-            StringBuilder message = new StringBuilder();
-            Object errors = status.get("Errors");
-            if (errors instanceof List<?> list) {
-                for (Object item : list) {
-                    if (item instanceof JSONObject err) {
-                        String msg = err.getStr("Message");
-                        if (StrUtil.isNotBlank(msg)) {
-                            message.append(message.length() > 0 ? "；" : "").append(msg);
-                        }
-                    }
-                }
-            }
-            if (message.length() == 0) {
-                message.append("未知业务错误");
-            }
-            throw new BizException(ErrorCode.ETL_EXECUTE_ERROR, "金蝶返回业务错误: " + message);
+            String detail = extractErrorMessages(status.get("Errors"));
+            throw new BizException(ErrorCode.ETL_EXECUTE_ERROR,
+                    "金蝶返回业务错误: " + (StrUtil.isBlank(detail) ? "未知业务错误" : detail));
         } catch (BizException be) {
             throw be;
         } catch (Exception ignored) {
@@ -265,6 +326,9 @@ public class WebApiExtractor {
             map.forEach((k, v) -> record.put(String.valueOf(k), v));
             records.add(record);
         }
+        // 金蝶 ExecuteBillQuery 出错时返回 [[{"Result":{"ResponseStatus":{...}}}]]，
+        // 错误对象藏在数据格子里，根节点检查不到，这里逐格兜底
+        assertNoCellBusinessError(records);
         return records;
     }
 
@@ -426,8 +490,26 @@ public class WebApiExtractor {
         if (StrUtil.isBlank(body)) return null;
         try {
             JSONObject obj = JSONUtil.parseObj(body);
+            String fieldKeysStr = null;
+            // 标准查询：data.FieldKeys
             JSONObject dataObj = obj.getJSONObject("data");
-            String fieldKeysStr = dataObj != null ? dataObj.getStr("FieldKeys") : obj.getStr("FieldKeys");
+            if (dataObj != null) {
+                fieldKeysStr = dataObj.getStr("FieldKeys");
+            }
+            // 报表方案查询：parameters[0].FieldKeys
+            if (StrUtil.isBlank(fieldKeysStr)) {
+                cn.hutool.json.JSONArray params = obj.getJSONArray("parameters");
+                if (params != null && !params.isEmpty()) {
+                    JSONObject first = params.getJSONObject(0);
+                    if (first != null) {
+                        fieldKeysStr = first.getStr("FieldKeys");
+                    }
+                }
+            }
+            // 兜底：根节点 FieldKeys
+            if (StrUtil.isBlank(fieldKeysStr)) {
+                fieldKeysStr = obj.getStr("FieldKeys");
+            }
             if (StrUtil.isNotBlank(fieldKeysStr)) {
                 return Arrays.stream(fieldKeysStr.split(","))
                         .map(String::trim)

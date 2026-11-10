@@ -194,6 +194,18 @@ pnpm dev
   * 支持注入鉴权 Header（如 `{"Authorization": "Bearer token"}`）及 JSON 请求体模板。
   * 采用 JsonPath 灵活提取数组节点（例如 `$.data.records` 或 `$.result.list`）。
   * 内置 **SSRF 安全防护**，拦截内网私有 IP 探测。
+  * **支持金蝶两种取数报文**（前端「取数方式」切换，后端按报文自动适配）：
+
+    | | 标准查询 | 报表方案查询 |
+    |---|---|---|
+    | 报文外形 | `{"data":{"FormId":…,"FilterString":…}}` | `{"parameters":[{"FORMID":…,"FSCHEMEID":…}]}` |
+    | 过滤条件 | `FilterString` 字符串（可用变量 `${name}`） | `QuicklyCondition` 数组（`FieldName` / `FieldValue`） |
+    | 方案 ID | 无 | `FSCHEMEID` |
+    | 典型接口 | `ExecuteBillQuery` / `BillQuery` | 带过滤方案的报表接口（如库存汇总表） |
+
+    后端自动识别 `parameters` 结构：分页字段写到 `parameters[0].StartRow` / `Limit`，并从同一位置读取 `FieldKeys`；
+    若显式配置过 `offsetPath` / `limitPath`，以显式配置为准。报表模式的过滤条件同样支持 `${变量}`，变量仍由「变量定义」里的 SQL 计算。
+  * **金蝶业务错误双层拦截**：除了检查响应根节点的 `Result.ResponseStatus.IsSuccess`，还会逐格检查数据单元格——`ExecuteBillQuery` 出错时返回的是 `[[{"Result":{"ResponseStatus":{…}}}]]`，错误对象藏在数据里，不拦就会被当成一条正常记录写进临时表。
   * **过滤条件支持多字段多条件**：
     * 结构化模式逐行配置「连接符(AND/OR) · 字段 · 操作符 · 值类型 · 值」，操作符含 `= <> > >= < <= LIKE NOT LIKE IN NOT IN IS NULL IS NOT NULL`。
     * 值类型支持文本、数字、**变量**、原始表达式；「变量」会从已定义的变量里下拉选择。

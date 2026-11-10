@@ -48,6 +48,10 @@ public class PaginationConfig {
     /** 调用频率限制：两次请求之间的间隔毫秒 */
     private long intervalMs = 0;
 
+    /** 是否显式配置过分页路径（显式配置时不做自动适配） */
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private boolean pathCustomized = false;
+
     /**
      * 解析配置；为空或非法配置时返回 null（不退化为分页，保持单次请求行为）
      */
@@ -62,6 +66,7 @@ public class PaginationConfig {
             if (!config.isEnabled()) {
                 return null;
             }
+            config.setPathCustomized(obj.containsKey("offsetPath") || obj.containsKey("limitPath"));
             config.setOffsetPath(StrUtil.blankToDefault(obj.getStr("offsetPath"), "data.StartRow"));
             config.setLimitPath(StrUtil.blankToDefault(obj.getStr("limitPath"), "data.Limit"));
             config.setStart(clamp(obj.getInt("start", 0), 0, 100_000_000));
@@ -111,6 +116,34 @@ public class PaginationConfig {
         JSONObject cursor = root;
         for (int i = 0; i < segments.length - 1; i++) {
             String segment = segments[i];
+            int bracket = segment.indexOf('[');
+            if (bracket > 0 && segment.endsWith("]")) {
+                // 支持 parameters[0].xxx 这类数组路径
+                String key = segment.substring(0, bracket);
+                int index;
+                try {
+                    index = Integer.parseInt(segment.substring(bracket + 1, segment.length() - 1));
+                } catch (NumberFormatException e) {
+                    throw new BizException(ErrorCode.PARAM_ERROR, "分页字段路径不合法: " + path);
+                }
+                cn.hutool.json.JSONArray array = cursor.getJSONArray(key);
+                if (array == null) {
+                    array = new cn.hutool.json.JSONArray();
+                    cursor.set(key, array);
+                }
+                while (array.size() <= index) {
+                    array.add(new JSONObject());
+                }
+                Object element = array.get(index);
+                if (!(element instanceof JSONObject)) {
+                    JSONObject created = new JSONObject();
+                    array.set(index, created);
+                    cursor = created;
+                } else {
+                    cursor = (JSONObject) element;
+                }
+                continue;
+            }
             Object next = cursor.get(segment);
             if (!(next instanceof JSONObject)) {
                 JSONObject created = new JSONObject();
@@ -121,6 +154,29 @@ public class PaginationConfig {
             }
         }
         cursor.set(segments[segments.length - 1], value);
+    }
+
+    /**
+     * 按请求体形态自动适配分页路径。
+     *
+     * <p>金蝶有两种取数报文：
+     * <ul>
+     *   <li>标准查询：{@code {"data":{"StartRow":0,"Limit":100}}} 如 ExecuteBillQuery</li>
+     *   <li>报表方案查询：{@code {"parameters":[{"StartRow":0,"Limit":100}]}} 如带 QuicklyCondition 的报表</li>
+     * </ul>
+     * 未显式配置路径时按报文自动切换，避免两处配置打架。
+     */
+    public void adaptToRequestBody(JSONObject body) {
+        if (body == null || pathCustomized) {
+            return;
+        }
+        if (body.containsKey("parameters")) {
+            setOffsetPath("parameters[0].StartRow");
+            setLimitPath("parameters[0].Limit");
+        } else {
+            setOffsetPath("data.StartRow");
+            setLimitPath("data.Limit");
+        }
     }
 
     /** 配置合法性校验（供保存时提示） */

@@ -307,7 +307,11 @@
 
                   <!-- 步骤二：金蝶单据数据抽取配置 -->
                   <a-card
-                    title="📥 步骤二：金蝶单据数据抽取配置 (DynamicFormService.ExecuteBillQuery)"
+                    :title="
+                      bodyMode === 'REPORT'
+                        ? '📥 步骤二：金蝶报表取数配置 (parameters + QuicklyCondition)'
+                        : '📥 步骤二：金蝶单据数据抽取配置 (DynamicFormService.ExecuteBillQuery)'
+                    "
                     :bordered="false"
                     class="pane-card module-card"
                   >
@@ -341,6 +345,29 @@
                     </template>
 
                     <a-row :gutter="16">
+                      <a-col :span="24">
+                        <a-form-item label="取数方式">
+                          <a-radio-group
+                            v-model:value="bodyMode"
+                            button-style="solid"
+                            @change="onBodyModeChange"
+                          >
+                            <a-radio-button value="STANDARD">
+                              标准查询（data.FormId + FilterString）
+                            </a-radio-button>
+                            <a-radio-button value="REPORT">
+                              报表方案查询（parameters + QuicklyCondition）
+                            </a-radio-button>
+                          </a-radio-group>
+                          <div class="fk-hint">
+                            标准查询对应 ExecuteBillQuery / BillQuery；报表方案对应带 FSCHEMEID
+                            与 QuicklyCondition 的报表接口。切换后请求体模板会自动重建，仍可在下方手动微调。
+                          </div>
+                        </a-form-item>
+                      </a-col>
+                    </a-row>
+
+                    <a-row :gutter="16">
                       <a-col :span="4">
                         <a-form-item label="请求方式">
                           <a-input value="POST" disabled />
@@ -359,15 +386,27 @@
                     <!-- 金蝶单据参数快捷向导表单 -->
                     <a-row :gutter="16">
                       <a-col :span="8">
-                        <a-form-item label="业务对象表单标识 (FormId)" required>
+                        <a-form-item
+                          :label="bodyMode === 'REPORT' ? '业务对象 (FORMID)' : '业务对象表单标识 (FormId)'"
+                          required
+                        >
                           <a-input
                             v-model:value="kingdeeQuery.formId"
-                            placeholder="如 PUR_PurchaseOrder / BD_MATERIAL"
+                            placeholder="如 PUR_PurchaseOrder / STK_StockSummaryRpt"
                             @change="syncKingdeeQueryToBody"
                           />
                         </a-form-item>
                       </a-col>
-                      <a-col :span="16">
+                      <a-col :span="8" v-if="bodyMode === 'REPORT'">
+                        <a-form-item label="过滤方案 ID (FSCHEMEID)">
+                          <a-input
+                            v-model:value="schemeId"
+                            placeholder="如 6ac9a38a6e3769"
+                            @change="syncKingdeeQueryToBody"
+                          />
+                        </a-form-item>
+                      </a-col>
+                      <a-col :span="bodyMode === 'REPORT' ? 8 : 16">
                         <a-form-item label="抽取字段列表" required>
                           <div class="fk-toolbar">
                             <span class="fk-count">
@@ -604,7 +643,122 @@
                       </template>
                     </a-modal>
 
-                    <a-row :gutter="16">
+                    <!-- 报表方案：查询条件 QuicklyCondition -->
+                    <a-row :gutter="16" v-if="bodyMode === 'REPORT'">
+                      <a-col :span="24">
+                        <a-form-item label="查询条件 (QuicklyCondition)">
+                          <div class="fk-toolbar">
+                            <span class="fk-count">
+                              {{ quickConditions.length }} 个条件 · 每行为 FieldName = FieldValue
+                            </span>
+                            <a-button size="small" @click="addQuickCondition">
+                              <plus-outlined /> 添加条件
+                            </a-button>
+                          </div>
+                        </a-form-item>
+                      </a-col>
+                    </a-row>
+
+                    <div v-if="bodyMode === 'REPORT'" class="filt-panel">
+                      <div class="var-box">
+                        <div class="var-head">
+                          <span class="var-title">变量定义</span>
+                          <span class="var-hint">
+                            执行时在目标数据源上以 SQL 计算，条件值里用 <code>${名称}</code> 引用；内置
+                            <code>${today}</code> <code>${yesterday}</code> <code>${now}</code>
+                          </span>
+                          <a-button size="small" type="link" @click="addVariable">
+                            <plus-outlined /> 添加变量
+                          </a-button>
+                        </div>
+                        <div v-for="(v, vi) in filterVariables" :key="v.rid" class="var-item">
+                          <div class="var-row">
+                            <a-input
+                              v-model:value="v.name"
+                              size="small"
+                              class="fk-input-mono"
+                              placeholder="变量名"
+                              style="width: 148px; flex: none"
+                              @change="onVariableEdited(v)"
+                            />
+                            <span class="var-eq">=</span>
+                            <a-textarea
+                              v-model:value="v.sql"
+                              size="small"
+                              class="fk-input-mono var-sql"
+                              :auto-size="{ minRows: 1, maxRows: 3 }"
+                              placeholder="SELECT 表达式，如 DATE_SUB(CURDATE(), INTERVAL ((WEEKDAY(CURDATE()) + 3) % 7 + 7) DAY)"
+                              style="flex: 1; min-width: 260px"
+                              @change="onVariableEdited(v)"
+                            />
+                            <a-tooltip title="在目标数据源上执行一次，立即看到取值">
+                              <a-button
+                                size="small"
+                                :loading="v.testing"
+                                @click="testVariable(v)"
+                              >
+                                试算
+                              </a-button>
+                            </a-tooltip>
+                            <a-button size="small" type="link" danger @click="removeVariable(vi)">
+                              删除
+                            </a-button>
+                          </div>
+                          <div
+                            v-if="v.result"
+                            class="var-result"
+                            :class="{ 'var-result-err': v.resultError }"
+                          >
+                            <template v-if="v.resultError">试算失败：{{ v.result }}</template>
+                            <template v-else>
+                              {{ v.name || '结果' }} = <b>{{ v.result }}</b>
+                              <span class="var-result-time">（{{ v.elapsedMs }} ms）</span>
+                            </template>
+                          </div>
+                        </div>
+                        <div v-if="!filterVariables.length" class="var-empty">
+                          未定义变量。需要「上个会计周」这类动态日期时，在此配置 SQL 即可，条件值选「变量」引用。
+                        </div>
+                      </div>
+
+                      <div v-for="(row, index) in quickConditions" :key="row.rid" class="filt-row">
+                        <a-auto-complete
+                          v-model:value="row.fieldName"
+                          size="small"
+                          class="fk-input-mono"
+                          :options="filterFieldOptions"
+                          placeholder="条件字段，如 BeginDate"
+                          style="flex: 1; min-width: 200px"
+                          @change="syncKingdeeQueryToBody"
+                        />
+                        <span class="filt-where">=</span>
+                        <a-input
+                          v-model:value="row.fieldValue"
+                          size="small"
+                          class="fk-input-mono"
+                          placeholder="值：变量写 ${NAME}，文本直接填"
+                          style="flex: 1; min-width: 200px"
+                          @change="syncKingdeeQueryToBody"
+                        />
+                        <a-button
+                          size="small"
+                          type="link"
+                          danger
+                          style="flex: none"
+                          @click="removeQuickCondition(index)"
+                        >
+                          删除
+                        </a-button>
+                      </div>
+                      <div v-if="!quickConditions.length" class="filt-empty">
+                        尚未添加条件，点击右上角「+ 添加条件」
+                      </div>
+                      <div class="filt-preview">
+                        生成：<code>{{ quickConditionPreview || '（空）' }}</code>
+                      </div>
+                    </div>
+
+                    <a-row :gutter="16" v-if="bodyMode !== 'REPORT'">
                       <a-col :span="24">
                         <a-form-item label="过滤条件 (FilterString)">
                           <div class="fk-toolbar">
@@ -629,7 +783,10 @@
                       </a-col>
                     </a-row>
 
-                    <div v-if="filterMode === 'table'" class="filt-panel">
+                    <div
+                      v-if="bodyMode !== 'REPORT' && filterMode === 'table'"
+                      class="filt-panel"
+                    >
                       <!-- 变量定义：值由 SQL 在目标数据源上计算 -->
                       <div class="var-box">
                         <div class="var-head">
@@ -773,7 +930,7 @@
                         生成：<code>{{ kingdeeQuery.filterString || '（空）' }}</code>
                       </div>
                     </div>
-                    <div v-else class="filt-panel">
+                    <div v-else-if="bodyMode !== 'REPORT'" class="filt-panel">
                       <a-textarea
                         v-model:value="kingdeeQuery.filterString"
                         :rows="3"
@@ -786,7 +943,7 @@
                       </div>
                     </div>
 
-                    <a-row :gutter="16">
+                    <a-row :gutter="16" v-if="bodyMode !== 'REPORT'">
                       <a-col :span="12">
                         <a-form-item label="排序规则 (OrderString)">
                           <a-input
@@ -1735,7 +1892,11 @@ const alertList = ref<EtlAlertConfig[]>([])
 const folderTree = ref<any[]>([])
 
 const headersPlaceholder = `{\n  "Content-Type": "application/json"\n}`
-const bodyPlaceholder = `{\n  "data": {\n    "FormId": "PUR_PurchaseOrder",\n    "FieldKeys": "FID,FBillNo,FDate,FSupplierId.FNumber,FDocumentStatus",\n    "FilterString": "FDate >= '\${yesterday}'",\n    "OrderString": "FID DESC",\n    "Limit": 2000,\n    "StartRow": 0\n  }\n}`
+const bodyPlaceholderStandard = `{\n  "data": {\n    "FormId": "PUR_PurchaseOrder",\n    "FieldKeys": "FID,FBillNo,FDate,FSupplierId.FNumber,FDocumentStatus",\n    "FilterString": "FDate >= '\${yesterday}'",\n    "OrderString": "FID DESC",\n    "Limit": 2000,\n    "StartRow": 0\n  }\n}`
+const bodyPlaceholderReport = `{\n  "parameters": [\n    {\n      "FORMID": "STK_StockSummaryRpt",\n      "FSCHEMEID": "6ac9a38a6e3769",\n      "QuicklyCondition": [\n        { "FieldName": "BeginDate", "FieldValue": "\${STARTDATE}" },\n        { "FieldName": "EndDate", "FieldValue": "\${ENDDATE}" }\n      ],\n      "StartRow": 0,\n      "Limit": 10000,\n      "FieldKeys": "FMATERIALNUMBER,FMATERIALNAME"\n    }\n  ]\n}`
+const bodyPlaceholder = computed(() =>
+  bodyMode.value === 'REPORT' ? bodyPlaceholderReport : bodyPlaceholderStandard
+)
 
 const initialFormData = (): Partial<EtlPipeline> => ({
   sourceType: 'MYSQL',
@@ -1771,6 +1932,52 @@ const defaultKingdeeQuery = () => ({
 })
 
 const kingdeeQuery = ref(defaultKingdeeQuery())
+
+// ===== 金蝶取数方式：标准查询 / 报表方案查询 =====
+type BodyMode = 'STANDARD' | 'REPORT'
+
+// 标准查询：{"data":{"FormId":...,"FilterString":...}} —— ExecuteBillQuery / BillQuery
+// 报表方案：{"parameters":[{"FORMID":...,"FSCHEMEID":...,"QuicklyCondition":[...]}]}
+const bodyMode = ref<BodyMode>('STANDARD')
+
+// 报表方案的过滤方案 ID
+const schemeId = ref('')
+
+interface QuickCondition {
+  rid: string
+  fieldName: string
+  fieldValue: string
+}
+
+let quickRidSeed = 0
+const quickConditions = ref<QuickCondition[]>([])
+
+const defaultQuickCondition = (): QuickCondition => {
+  quickRidSeed += 1
+  return { rid: `qc_${quickRidSeed}`, fieldName: '', fieldValue: '' }
+}
+
+const addQuickCondition = () => {
+  quickConditions.value.push(defaultQuickCondition())
+  syncKingdeeQueryToBody()
+}
+
+const removeQuickCondition = (index: number) => {
+  quickConditions.value.splice(index, 1)
+  syncKingdeeQueryToBody()
+}
+
+const onBodyModeChange = () => {
+  syncKingdeeQueryToBody()
+}
+
+// 报表模式的条件预览
+const quickConditionPreview = computed(() =>
+  quickConditions.value
+    .filter((c) => c.fieldName.trim())
+    .map((c) => `${c.fieldName.trim()} = ${c.fieldValue}`)
+    .join(' AND ')
+)
 
 // ===== 高级配置：分页取数（对应 t_etl_pipeline.api_pagination） =====
 const defaultPagination = () => ({
@@ -2538,21 +2745,43 @@ const syncKingdeeLoginBody = () => {
 
 // 同步金蝶单据参数至 Body
 const syncKingdeeQueryToBody = () => {
-  formData.value.apiBody = JSON.stringify(
-    {
-      data: {
-        FormId: kingdeeQuery.value.formId || '',
-        FieldKeys: kingdeeQuery.value.fieldKeys || '',
-        FilterString: kingdeeQuery.value.filterString || '',
-        OrderString: kingdeeQuery.value.orderString || '',
-        TopRowCount: 0,
-        Limit: kingdeeQuery.value.limit || 2000,
-        StartRow: 0
-      }
-    },
-    null,
-    2
-  )
+  if (bodyMode.value === 'REPORT') {
+    // 报表方案查询：过滤条件走 QuicklyCondition 数组，没有 FilterString / OrderString
+    formData.value.apiBody = JSON.stringify(
+      {
+        parameters: [
+          {
+            FORMID: kingdeeQuery.value.formId || '',
+            FSCHEMEID: schemeId.value || '',
+            QuicklyCondition: quickConditions.value
+              .filter((c) => c.fieldName.trim())
+              .map((c) => ({ FieldName: c.fieldName.trim(), FieldValue: c.fieldValue })),
+            StartRow: 0,
+            Limit: kingdeeQuery.value.limit || 2000,
+            FieldKeys: kingdeeQuery.value.fieldKeys || ''
+          }
+        ]
+      },
+      null,
+      2
+    )
+  } else {
+    formData.value.apiBody = JSON.stringify(
+      {
+        data: {
+          FormId: kingdeeQuery.value.formId || '',
+          FieldKeys: kingdeeQuery.value.fieldKeys || '',
+          FilterString: kingdeeQuery.value.filterString || '',
+          OrderString: kingdeeQuery.value.orderString || '',
+          TopRowCount: 0,
+          Limit: kingdeeQuery.value.limit || 2000,
+          StartRow: 0
+        }
+      },
+      null,
+      2
+    )
+  }
 
   // 每页条数与「单次抓取上限」联动，避免两处配置打架
   const limit = kingdeeQuery.value.limit || 2000
@@ -2785,6 +3014,29 @@ const syncBodyToKingdeeQuery = () => {
   try {
     if (!formData.value.apiBody) return
     const parsed = JSON.parse(formData.value.apiBody)
+
+    // 报表方案查询：parameters[0] + QuicklyCondition
+    if (Array.isArray(parsed.parameters) && parsed.parameters[0]) {
+      const p = parsed.parameters[0]
+      bodyMode.value = 'REPORT'
+      if (p.FORMID) kingdeeQuery.value.formId = p.FORMID
+      if (p.FSCHEMEID !== undefined) schemeId.value = p.FSCHEMEID
+      if (p.FieldKeys) kingdeeQuery.value.fieldKeys = p.FieldKeys
+      if (p.Limit !== undefined) kingdeeQuery.value.limit = p.Limit
+      const conditions = Array.isArray(p.QuicklyCondition) ? p.QuicklyCondition : []
+      quickConditions.value = conditions.map((c: any) => ({
+        rid: `qc_${++quickRidSeed}`,
+        fieldName: String(c?.FieldName ?? ''),
+        fieldValue: String(c?.FieldValue ?? '')
+      }))
+      rebuildFieldRows()
+      loadFilter(true)
+      loadSyncConfig()
+      return
+    }
+
+    // 标准查询：data / 根节点
+    bodyMode.value = 'STANDARD'
     const d = parsed.data || parsed
     if (d.FormId) kingdeeQuery.value.formId = d.FormId
     if (d.FieldKeys) kingdeeQuery.value.fieldKeys = d.FieldKeys

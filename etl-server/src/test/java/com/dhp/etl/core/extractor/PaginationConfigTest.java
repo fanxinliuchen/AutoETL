@@ -95,4 +95,59 @@ class PaginationConfigTest {
         PaginationConfig.setPath(body, "page.offset.value", 20);
         assertEquals(20, body.getByPath("page.offset.value", Integer.class));
     }
+
+    // ===== 金蝶两种报文的路径适配 =====
+
+    @Test
+    @DisplayName("标准报文：沿用 data.StartRow / data.Limit")
+    void adaptStandardBody() {
+        PaginationConfig config = PaginationConfig.parse("{\"enabled\":true,\"pageSize\":100}");
+        JSONObject body = JSONUtil.parseObj("{\"data\":{\"FormId\":\"PUR_PurchaseOrder\",\"StartRow\":0,\"Limit\":100}}");
+        config.adaptToRequestBody(body);
+        assertEquals("data.StartRow", config.getOffsetPath());
+        assertEquals("data.Limit", config.getLimitPath());
+
+        PaginationConfig.setPath(body, config.getOffsetPath(), 300);
+        assertEquals(300, body.getJSONObject("data").getInt("StartRow"));
+    }
+
+    @Test
+    @DisplayName("报表报文：自动切到 parameters[0].StartRow / Limit")
+    void adaptReportBody() {
+        PaginationConfig config = PaginationConfig.parse("{\"enabled\":true,\"pageSize\":100}");
+        JSONObject body = JSONUtil.parseObj(
+                "{\"parameters\":[{\"FORMID\":\"STK_StockSummaryRpt\",\"StartRow\":0,\"Limit\":100}]}");
+        config.adaptToRequestBody(body);
+
+        assertEquals("parameters[0].StartRow", config.getOffsetPath());
+        assertEquals("parameters[0].Limit", config.getLimitPath());
+
+        PaginationConfig.setPath(body, config.getOffsetPath(), 500);
+        PaginationConfig.setPath(body, config.getLimitPath(), 200);
+        JSONObject first = body.getJSONArray("parameters").getJSONObject(0);
+        assertEquals(500, first.getInt("StartRow"));
+        assertEquals(200, first.getInt("Limit"));
+        // 原有字段不能被破坏
+        assertEquals("STK_StockSummaryRpt", first.getStr("FORMID"));
+    }
+
+    @Test
+    @DisplayName("显式配置过路径时不自动覆盖")
+    void keepCustomPath() {
+        PaginationConfig config = PaginationConfig.parse(
+                "{\"enabled\":true,\"offsetPath\":\"data.StartRow\",\"limitPath\":\"data.Limit\"}");
+        JSONObject body = JSONUtil.parseObj("{\"parameters\":[{\"StartRow\":0}]}");
+        config.adaptToRequestBody(body);
+        assertEquals("data.StartRow", config.getOffsetPath());
+    }
+
+    @Test
+    @DisplayName("parameters 数组不存在时按需创建")
+    void createArrayNodeIfMissing() {
+        PaginationConfig config = PaginationConfig.parse("{\"enabled\":true}");
+        JSONObject body = JSONUtil.parseObj("{\"parameters\":[{}]}");
+        config.adaptToRequestBody(body);
+        PaginationConfig.setPath(body, config.getOffsetPath(), 42);
+        assertEquals(42, body.getJSONArray("parameters").getJSONObject(0).getInt("StartRow"));
+    }
 }
