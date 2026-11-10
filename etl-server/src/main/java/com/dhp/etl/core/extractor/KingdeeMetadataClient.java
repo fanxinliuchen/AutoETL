@@ -59,6 +59,98 @@ public class KingdeeMetadataClient {
      * @return 每项包含 key / label / type / rawType
      */
     public List<Map<String, Object>> queryFormFields(KingdeeFormFieldQueryDTO dto) {
+        return parseFields(fetchBusinessInfo(dto), dto.getFormId());
+    }
+
+    /**
+     * 识别表单属于「单据」还是「报表」，供前端「取数方式 = 自动识别」使用。
+     *
+     * <p>判据不是 FormId 的命名（STK_InStock 是单据、STK_StockSummaryRpt 是报表，前缀靠不住），
+     * 而是 QueryBusinessInfo 能否吐出字段定义：
+     * 有字段 -> 单据（data.FormId 报文）；无字段 -> 报表（parameters + FSCHEMEID 报文）。
+     */
+    public Map<String, Object> detectFormType(KingdeeFormFieldQueryDTO dto) {
+        return detectTypeFromBody(fetchBusinessInfo(dto), dto.getFormId());
+    }
+
+    /**
+     * 纯解析层：由 QueryBusinessInfo 的原始返回判断表单类型（便于单测，不发网络请求）
+     */
+    Map<String, Object> detectTypeFromBody(String responseBody, String formId) {
+        JSONObject root = parseRoot(responseBody);
+        assertSuccess(root, formId);
+        List<Map<String, Object>> fields = extractFields(root);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("formId", formId);
+        result.put("fieldCount", fields.size());
+        if (!fields.isEmpty()) {
+            result.put("type", "BILL");
+            result.put("reason", "金蝶返回了 " + fields.size() + " 个字段定义，按标准单据查询（data.FormId）取数");
+        } else {
+            result.put("type", "REPORT");
+            result.put("reason", reportReason(root));
+        }
+        return result;
+    }
+
+    /**
+     * 无字段定义时的判定说明，把金蝶返回的报表特征一并带上，便于排查。
+     *
+     * <p>不同版本把 LinkSet 挂在 Result 或 NeedReturnData 下，这里递归查找，避免判据落空。
+     */
+    private String reportReason(JSONObject root) {
+        StringBuilder reason = new StringBuilder(
+                "金蝶未返回单据字段定义，判定为报表/账表类表单，按报表方案查询（parameters + FSCHEMEID）取数");
+        Object isNeedLinkTable = findDeep(root, "IsNeedLinkTable");
+        Object linkEntitys = findDeep(root, "LinkEntitys");
+        if (isNeedLinkTable != null || linkEntitys != null) {
+            reason.append("；返回特征：IsNeedLinkTable=").append(isNeedLinkTable)
+                    .append(", LinkEntitys=").append(describeLinkEntitys(linkEntitys));
+        }
+        return reason.toString();
+    }
+
+    /** 报表特征值的人类可读描述，避免把空数组说成“非空” */
+    private String describeLinkEntitys(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        if (value instanceof JSONArray array) {
+            return array.isEmpty() ? "[]（空）" : "非空";
+        }
+        return String.valueOf(value);
+    }
+
+    /**
+     * 在返回结构中递归查找某个键（报表特征字段的位置各版本不一）
+     */
+    private Object findDeep(Object node, String key) {
+        if (node instanceof JSONObject obj) {
+            if (obj.containsKey(key)) {
+                return obj.get(key);
+            }
+            for (Object value : obj.values()) {
+                Object found = findDeep(value, key);
+                if (found != null) {
+                    return found;
+                }
+            }
+        } else if (node instanceof JSONArray array) {
+            for (Object item : array) {
+                Object found = findDeep(item, key);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 登录并调用 QueryBusinessInfo，返回原始响应体（字段查询与类型识别共用）
+     */
+    private String fetchBusinessInfo(KingdeeFormFieldQueryDTO dto) {
         String cookie = login(dto);
         String metadataUrl = buildMetadataUrl(dto.getLoginUrl());
         webApiExtractor.validateUrlSafety(metadataUrl);
@@ -86,8 +178,7 @@ public class KingdeeMetadataClient {
 
         log.debug("金蝶 QueryBusinessInfo 原始返回(FormId={}): {}",
                 dto.getFormId(), StrUtil.brief(responseBody, 4000));
-
-        return parseFields(responseBody, dto.getFormId());
+        return responseBody;
     }
 
     /**
@@ -125,6 +216,21 @@ public class KingdeeMetadataClient {
      * 解析 QueryBusinessInfo 返回。容错处理不同版本的返回结构差异。
      */
     List<Map<String, Object>> parseFields(String responseBody, String formId) {
+        JSONObject root = parseRoot(responseBody);
+        assertSuccess(root, formId);
+
+        List<Map<String, Object>> merged = extractFields(root);
+        if (merged.isEmpty()) {
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    "未能从返回结果中识别出字段定义，原始返回片段: " + StrUtil.brief(responseBody, 200));
+        }
+        return merged;
+    }
+
+    /**
+     * 响应体 -> JSON 根节点：拦截空响应、网关 HTML 错误页与非法 JSON
+     */
+    private JSONObject parseRoot(String responseBody) {
         if (StrUtil.isBlank(responseBody)) {
             throw new BizException(ErrorCode.PARAM_ERROR, "金蝶元数据接口返回为空");
         }
@@ -136,15 +242,18 @@ public class KingdeeMetadataClient {
                     "金蝶元数据返回不是合法 JSON（可能被网关或代理拦截），片段: " + StrUtil.brief(responseBody, 120));
         }
 
-        JSONObject root;
         try {
-            root = JSONUtil.parseObj(responseBody);
+            return JSONUtil.parseObj(responseBody);
         } catch (Exception e) {
-            throw new BizException(ErrorCode.PARAM_ERROR, "金蝶元数据返回不是合法 JSON: " + StrUtil.brief(responseBody, 120));
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    "金蝶元数据返回不是合法 JSON: " + StrUtil.brief(responseBody, 120));
         }
+    }
 
-        assertSuccess(root, formId);
-
+    /**
+     * 从返回结构中抽取并去重字段定义（报表类表单会返回空列表，不视为异常）
+     */
+    private List<Map<String, Object>> extractFields(JSONObject root) {
         List<JSONObject> candidates = new ArrayList<>();
         collectFieldCandidates(root, candidates);
 
@@ -167,11 +276,6 @@ public class KingdeeMetadataClient {
             item.put("type", type);
             item.put("rawType", typeHint);
             merged.putIfAbsent(key.toUpperCase(), item);
-        }
-
-        if (merged.isEmpty()) {
-            throw new BizException(ErrorCode.PARAM_ERROR,
-                    "未能从返回结果中识别出字段定义，原始返回片段: " + StrUtil.brief(responseBody, 200));
         }
         return new ArrayList<>(merged.values());
     }

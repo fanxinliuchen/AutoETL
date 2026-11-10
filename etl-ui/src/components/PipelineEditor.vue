@@ -348,10 +348,11 @@
                       <a-col :span="24">
                         <a-form-item label="取数方式">
                           <a-radio-group
-                            v-model:value="bodyMode"
+                            v-model:value="bodyModeSel"
                             button-style="solid"
-                            @change="onBodyModeChange"
+                            @change="onBodyModeSelChange"
                           >
+                            <a-radio-button value="AUTO">自动识别（推荐）</a-radio-button>
                             <a-radio-button value="STANDARD">
                               标准查询（data.FormId + FilterString）
                             </a-radio-button>
@@ -359,9 +360,34 @@
                               报表方案查询（parameters + QuicklyCondition）
                             </a-radio-button>
                           </a-radio-group>
+                          <div class="detect-line">
+                            <a-spin v-if="detectLoading" size="small" />
+                            <a-tag v-if="bodyModeSel !== 'AUTO'" color="default" class="detect-tag">
+                              已手动指定，不再自动切换
+                            </a-tag>
+                            <a-tag
+                              v-else-if="detectResult && detectResult.formId === kingdeeQuery.formId"
+                              :color="detectResult.type === 'STANDARD' ? 'green' : 'orange'"
+                              class="detect-tag"
+                            >
+                              {{
+                                detectResult.type === 'STANDARD'
+                                  ? `已识别：单据（${detectResult.fieldCount} 个字段）`
+                                  : '已识别：报表（无单据字段定义）'
+                              }}
+                            </a-tag>
+                            <span v-if="detectError" class="detect-err">识别失败：{{ detectError }}</span>
+                            <span
+                              v-else-if="detectResult && detectResult.formId === kingdeeQuery.formId"
+                              class="detect-reason"
+                            >
+                              {{ detectResult.reason }}
+                            </span>
+                          </div>
                           <div class="fk-hint">
-                            标准查询对应 ExecuteBillQuery / BillQuery；报表方案对应带 FSCHEMEID
-                            与 QuicklyCondition 的报表接口。切换后请求体模板会自动重建，仍可在下方手动微调。
+                            自动识别会用 QueryBusinessInfo 探一次表单：能取到字段定义的是单据，走
+                            ExecuteBillQuery；取不到的是报表，走带 FSCHEMEID 与 QuicklyCondition
+                            的报表接口。手动选择后不再被自动结果覆盖；切换会重建请求体模板，仍可在下方微调。
                           </div>
                         </a-form-item>
                       </a-col>
@@ -393,7 +419,7 @@
                           <a-input
                             v-model:value="kingdeeQuery.formId"
                             placeholder="如 PUR_PurchaseOrder / STK_StockSummaryRpt"
-                            @change="syncKingdeeQueryToBody"
+                            @change="onFormIdChanged"
                           />
                         </a-form-item>
                       </a-col>
@@ -1930,6 +1956,7 @@ import {
   testWebapiLogin,
   previewWebapiExtract,
   queryKingdeeFormFields,
+  detectKingdeeForm,
   saveKingdeeCredential,
   getKingdeeCredentialDefault,
   evaluateVariable,
@@ -2021,7 +2048,24 @@ type BodyMode = 'STANDARD' | 'REPORT'
 
 // 标准查询：{"data":{"FormId":...,"FilterString":...}} —— ExecuteBillQuery / BillQuery
 // 报表方案：{"parameters":[{"FORMID":...,"FSCHEMEID":...,"QuicklyCondition":[...]}]}
+// 实际生效的报文模式（由 自动识别 / 手动指定 / 已保存报文 决定）
 const bodyMode = ref<BodyMode>('STANDARD')
+
+// 用户的选择：自动识别 / 手动指定标准查询 / 手动指定报表方案。
+// 手动指定后不再被自动识别结果覆盖（随 filter_meta 持久化）
+type BodyModeSel = 'AUTO' | BodyMode
+const bodyModeSel = ref<BodyModeSel>('AUTO')
+
+// 自动识别状态
+const detectLoading = ref(false)
+const detectError = ref('')
+const detectResult = ref<{
+  formId: string
+  type: BodyMode
+  fieldCount: number
+  reason: string
+} | null>(null)
+let detectTimer: ReturnType<typeof setTimeout> | undefined
 
 // 报文结构识别结果：UNKNOWN 表示既不是标准查询也不是报表方案（例如手工粘贴的自定义报文）
 type BodyShape = BodyMode | 'UNKNOWN'
@@ -2059,8 +2103,77 @@ const removeQuickCondition = (index: number) => {
   syncKingdeeQueryToBody()
 }
 
-const onBodyModeChange = () => {
+// 手动切换取数方式：记住选择并重建报文模板；手动选定后不再被自动识别覆盖
+const onBodyModeSelChange = () => {
+  formData.value.filterMeta = buildFilterMeta()
+  detectResult.value = null
+  detectError.value = ''
+  if (bodyModeSel.value === 'AUTO') {
+    detectFormType()
+    return
+  }
+  bodyMode.value = bodyModeSel.value
   syncKingdeeQueryToBody()
+}
+
+// FormId 改动：先同步报文，再在「自动识别」下重新探测表单类型
+const onFormIdChanged = () => {
+  syncKingdeeQueryToBody()
+  detectResult.value = null
+  detectError.value = ''
+  scheduleDetect()
+}
+
+// 输入过程中防抖，避免每敲一个字符就打一次金蝶
+const scheduleDetect = () => {
+  if (bodyModeSel.value !== 'AUTO') return
+  if (detectTimer) clearTimeout(detectTimer)
+  detectTimer = setTimeout(() => detectFormType(), 600)
+}
+
+/**
+ * 探测表单类型（单据 / 报表）。
+ *
+ * <p>只有「自动识别」模式才会改报文模板；手动指定时仅展示探测结果，不覆盖用户选择。
+ */
+const detectFormType = async () => {
+  const formId = kingdeeQuery.value.formId?.trim()
+  if (!formId || !kingdeeConfig.value.loginUrl) {
+    detectResult.value = null
+    detectError.value = ''
+    return
+  }
+  if (detectLoading.value) return
+  detectLoading.value = true
+  detectError.value = ''
+  try {
+    const r = await detectKingdeeForm({
+      loginUrl: kingdeeConfig.value.loginUrl,
+      acctID: kingdeeConfig.value.acctID,
+      userName: kingdeeConfig.value.userName,
+      password: effectivePassword() || undefined,
+      lcid: kingdeeConfig.value.lcid,
+      formId
+    })
+    detectResult.value = {
+      formId: r.formId || formId,
+      // 后端返回 BILL / REPORT，前端用 STANDARD / REPORT 表示报文形态
+      type: r.type === 'BILL' ? 'STANDARD' : 'REPORT',
+      fieldCount: r.fieldCount,
+      reason: r.reason
+    }
+    if (bodyModeSel.value === 'AUTO' && bodyMode.value !== detectResult.value.type) {
+      bodyMode.value = detectResult.value.type
+      if (!bodyManual.value) {
+        syncKingdeeQueryToBody()
+      }
+    }
+  } catch (e: any) {
+    detectResult.value = null
+    detectError.value = e?.message || '探测失败'
+  } finally {
+    detectLoading.value = false
+  }
 }
 
 // 报表模式的条件预览
@@ -2557,11 +2670,12 @@ const buildFilterString = () => {
     .join(' ')
 }
 
-// 结构化条件 -> FilterString（并同步请求体与持久化配置）
-const applyFilterConditions = () => {
-  kingdeeQuery.value.filterString = buildFilterString()
-  formData.value.filterMeta = JSON.stringify({
+// filter_meta 统一序列化：过滤模式 / 取数方式 / 变量 / 循环 / 条件都在这里落库，
+// 任何一处改动都走同一个函数，避免某个分支把别的配置写丢
+const buildFilterMeta = () =>
+  JSON.stringify({
     mode: filterMode.value,
+    bodyMode: bodyModeSel.value,
     variables: filterVariables.value
       .map((v) => ({ name: v.name.trim(), sql: v.sql.trim() }))
       .filter((v) => v.name && v.sql),
@@ -2575,6 +2689,11 @@ const applyFilterConditions = () => {
       : { enabled: false },
     conditions: filterConditions.value
   })
+
+// 结构化条件 -> FilterString（并同步请求体与持久化配置）
+const applyFilterConditions = () => {
+  kingdeeQuery.value.filterString = buildFilterString()
+  formData.value.filterMeta = buildFilterMeta()
   syncKingdeeQueryToBody()
 }
 
@@ -2700,11 +2819,16 @@ const loadFilter = (preserveMode = false) => {
   filterVariables.value = []
   loopConfig.value = defaultLoopConfig()
   loopPreview.value = null
+  bodyModeSel.value = 'AUTO'
   if (formData.value.filterMeta) {
     try {
       const parsed = JSON.parse(formData.value.filterMeta)
       if (parsed?.mode === 'text') {
         filterMode.value = 'text'
+      }
+      // 取数方式：老流程没有该字段时按「自动识别」处理
+      if (['AUTO', 'STANDARD', 'REPORT'].includes(parsed?.bodyMode)) {
+        bodyModeSel.value = parsed.bodyMode
       }
       if (parsed?.loop) {
         loopConfig.value = {
@@ -2759,10 +2883,8 @@ const switchFilterMode = () => {
     }
   }
   filterMode.value = filterMode.value === 'table' ? 'text' : 'table'
-  formData.value.filterMeta = JSON.stringify({
-    mode: filterMode.value,
-    conditions: filterConditions.value
-  })
+  // 只改模式：变量、循环、取数方式等其余配置必须原样保留
+  formData.value.filterMeta = buildFilterMeta()
 }
 
 // 字段名候选（来自已拉取的字段清单），用于过滤条件输入提示
@@ -3081,6 +3203,19 @@ const handlePullKingdeeFields = async () => {
   }
   if (!kingdeeConfig.value.loginUrl) {
     message.warning('请先在上方填写金蝶登录接口地址')
+    return
+  }
+  // 已确认是报表：QueryBusinessInfo 本来就没有列定义，直接说明原因，别让用户等一次必然失败的请求
+  if (
+    bodyMode.value === 'REPORT' &&
+    detectResult.value?.type === 'REPORT' &&
+    detectResult.value.formId === kingdeeQuery.value.formId
+  ) {
+    kingdeeFields.value = []
+    kingdeeFieldModalVisible.value = true
+    kingdeeFieldsLoading.value = false
+    kingdeeFieldError.value =
+      '该表单是报表类（金蝶未返回单据字段定义），无法通过 QueryBusinessInfo 拉取列；请直接在「抽取字段列表」手工填写，或用 Excel 导入。'
     return
   }
   kingdeeFields.value = []
@@ -3586,6 +3721,8 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     // 之后保存时按原文提交，不能被向导字段重置
     bodyManual.value = false
     bodySaveWarning.value = ''
+    detectResult.value = null
+    detectError.value = ''
     if (record.apiBody) {
       const shape = syncBodyToKingdeeQuery()
       if (shape === 'UNKNOWN' && record.apiBody.trim().startsWith('{')) {
@@ -3601,6 +3738,10 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     loadPagination()
     loadFilter()
     loadSyncConfig()
+    // 手动钉死的取数方式优先于报文里体现的模式
+    if (bodyModeSel.value !== 'AUTO') {
+      bodyMode.value = bodyModeSel.value
+    }
   } else {
     isEdit.value = false
     currentId.value = ''
@@ -3611,6 +3752,11 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     kingdeeQuery.value = defaultKingdeeQuery()
     pagination.value = defaultPagination()
     advancedActiveKeys.value = ['pagination']
+    // 新建流程回到默认口径，避免沿用上一条流程的取数方式
+    bodyMode.value = 'STANDARD'
+    bodyModeSel.value = 'AUTO'
+    detectResult.value = null
+    detectError.value = ''
     syncKingdeeLoginBody()
     syncKingdeeQueryToBody()
     rebuildFieldRows()
@@ -3635,6 +3781,10 @@ const handleReset = () => {
     kingdeeQuery.value = defaultKingdeeQuery()
     pagination.value = defaultPagination()
     advancedActiveKeys.value = ['pagination']
+    bodyMode.value = 'STANDARD'
+    bodyModeSel.value = 'AUTO'
+    detectResult.value = null
+    detectError.value = ''
     syncKingdeeLoginBody()
     syncKingdeeQueryToBody()
     rebuildFieldRows()
@@ -4022,6 +4172,30 @@ defineExpose({ open })
   font-size: 12px;
   line-height: 1.6;
   color: #1677ff;
+}
+
+/* 取数方式：自动识别状态行 */
+.detect-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  min-height: 22px;
+  font-size: 12px;
+}
+
+.detect-tag {
+  margin: 0;
+}
+
+.detect-err {
+  color: #cf1322;
+}
+
+.detect-reason {
+  color: #8c8c8c;
+  line-height: 1.6;
 }
 
 .fk-input-mono :deep(input) {

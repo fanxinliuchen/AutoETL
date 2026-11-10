@@ -118,6 +118,13 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
         return R.ok(kingdeeMetadataClient.queryFormFields(dto));
     }
 
+    @Operation(summary = "识别金蝶表单类型（单据 / 报表），用于取数方式自动选择")
+    @PostMapping("/webapi/detect-form")
+    public R<Map<String, Object>> detectKingdeeFormType(
+            @RequestBody @Valid KingdeeFormFieldQueryDTO dto) {
+        return R.ok(kingdeeMetadataClient.detectFormType(dto));
+    }
+
     @Operation(summary = "WebAPI 抽取测试与数据预览")
     @PostMapping("/webapi/preview")
     public R<Map<String, Object>> previewWebapiExtract(@RequestBody EtlPipeline pipeline) {

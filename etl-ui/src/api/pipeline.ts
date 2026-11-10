@@ -56,16 +56,36 @@ export interface KingdeeFieldMeta {
   rawType?: string
 }
 
-export function queryKingdeeFormFields(data: {
+/** 金蝶元数据类接口的公共入参（登录信息 + 表单标识） */
+export interface KingdeeFormQueryParams {
   loginUrl: string
   acctID?: string
   userName?: string
   password?: string
   lcid?: number
   formId: string
-}): Promise<KingdeeFieldMeta[]> {
+}
+
+export function queryKingdeeFormFields(data: KingdeeFormQueryParams): Promise<KingdeeFieldMeta[]> {
   // 失败原因在「从金蝶拉取字段」弹窗内就地展示，这里不再弹全局提示
   return request.post('/etl/pipeline/webapi/form-fields', data, { silent: true })
+}
+
+/** 表单类型识别结果：BILL=单据（标准查询），REPORT=报表（parameters 方案） */
+export interface FormTypeDetectResult {
+  formId: string
+  type: 'BILL' | 'REPORT'
+  fieldCount: number
+  reason: string
+}
+
+/**
+ * 识别表单属于单据还是报表。
+ * 判据是 QueryBusinessInfo 能否吐出字段定义，而不是 FormId 的命名。
+ */
+export function detectKingdeeForm(data: KingdeeFormQueryParams): Promise<FormTypeDetectResult> {
+  // 识别失败在「取数方式」旁边就地提示，不弹全局错误
+  return request.post('/etl/pipeline/webapi/detect-form', data, { silent: true })
 }
 
 export interface KingdeeCredentialMasked {

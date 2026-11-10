@@ -204,4 +204,58 @@ class KingdeeMetadataClientTest {
         assertEquals("DECIMAL(18,4)", KingdeeMetadataClient.inferTypeByKey("FBillTaxAmount"));
         assertEquals("TEXT", KingdeeMetadataClient.inferTypeByKey(""));
     }
+
+    /** 报表类表单（STK_StockSummaryRpt）的真实返回：有 ResponseStatus，但没有任何字段定义 */
+    private static final String REPORT_SHAPE = """
+            {
+              "Result": {
+                "ResponseStatus": {
+                  "IsSuccess": true, "Errors": [], "SuccessEntitys": [], "SuccessMessages": []
+                },
+                "LinkSet": { "IsNeedLinkTable": false, "LinkEntitys": null },
+                "NeedReturnData": { "IsNeedLinkTable": false, "LinkEntitys": null }
+              }
+            }
+            """;
+
+    @Test
+    @DisplayName("类型识别：有字段定义判为单据")
+    void detectBill() {
+        Map<String, Object> result = client.detectTypeFromBody(REAL_SHAPE, "PUR_PurchaseOrder");
+
+        assertEquals("BILL", result.get("type"));
+        assertEquals(5, result.get("fieldCount"));
+        assertTrue(String.valueOf(result.get("reason")).contains("5 个字段定义"), String.valueOf(result.get("reason")));
+    }
+
+    @Test
+    @DisplayName("类型识别：无字段定义判为报表，并带出报表特征")
+    void detectReport() {
+        Map<String, Object> result = client.detectTypeFromBody(REPORT_SHAPE, "STK_StockSummaryRpt");
+
+        assertEquals("REPORT", result.get("type"));
+        assertEquals(0, result.get("fieldCount"));
+        String reason = String.valueOf(result.get("reason"));
+        assertTrue(reason.contains("报表方案"), reason);
+        assertTrue(reason.contains("IsNeedLinkTable=false"), reason);
+    }
+
+    @Test
+    @DisplayName("类型识别：金蝶业务错误照常抛出，不误判成报表")
+    void detectFailsOnBusinessError() {
+        String json = """
+                {
+                  "Result": {
+                    "ResponseStatus": {
+                      "IsSuccess": false,
+                      "Errors": [ { "Message": "表单 STK_XXX 不存在" } ]
+                    }
+                  }
+                }
+                """;
+
+        BizException ex = assertThrows(BizException.class,
+                () -> client.detectTypeFromBody(json, "STK_XXX"));
+        assertTrue(ex.getMessage().contains("STK_XXX 不存在"), ex.getMessage());
+    }
 }
