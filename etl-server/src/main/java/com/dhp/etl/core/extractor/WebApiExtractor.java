@@ -92,7 +92,7 @@ public class WebApiExtractor {
         String body = sendOnce(apiUrl, method, headers, requestBody);
         logBuffer.append(String.format("[WebAPI] 响应成功，数据长度: %d 字符\n", body != null ? body.length() : 0));
 
-        List<Map<String, Object>> records = parseRecords(body, jsonPath, fieldKeys);
+        List<Map<String, Object>> records = parseRecords(body, jsonPath, fieldKeys, logBuffer);
         logBuffer.append(String.format("[WebAPI] JsonPath (%s) 抽取解析得到: %d 条记录\n", jsonPath, records.size()));
         return records;
     }
@@ -143,7 +143,7 @@ public class WebApiExtractor {
             List<Map<String, Object>> pageRecords;
             try {
                 String body = sendOnce(apiUrl, method, headers, pageBody.toString());
-                pageRecords = parseRecords(body, jsonPath, fieldKeys);
+                pageRecords = parseRecords(body, jsonPath, fieldKeys, logBuffer);
             } catch (BizException be) {
                 throw new BizException(ErrorCode.ETL_EXECUTE_ERROR, String.format(
                         "分页第 %d 页拉取失败（此前已成功 %d 页 / %d 条）: %s",
@@ -309,7 +309,7 @@ public class WebApiExtractor {
     /**
      * 按 JsonPath 解析响应，支持对象数组与金蝶二维数组两种形态
      */
-    private List<Map<String, Object>> parseRecords(String body, String jsonPath, List<String> fieldKeys) {
+    private List<Map<String, Object>> parseRecords(String body, String jsonPath, List<String> fieldKeys, StringBuilder logBuffer) {
         assertBusinessSuccess(body);
         Object extracted = JsonPath.read(body, jsonPath);
         List<Map<String, Object>> records = new ArrayList<>();
@@ -317,28 +317,59 @@ public class WebApiExtractor {
         if (extracted instanceof List<?> list) {
             for (Object item : list) {
                 if (item instanceof Map<?, ?> map) {
-                    Map<String, Object> record = new LinkedHashMap<>();
-                    map.forEach((k, v) -> record.put(String.valueOf(k), v));
-                    records.add(record);
+                    records.add(projectRecord(map, fieldKeys));
                 } else if (item instanceof List<?> rowList) {
                     // 金蝶 ExecuteBillQuery 常返回二维数组: [ [1, "A"], [2, "B"] ]
-                    Map<String, Object> record = new LinkedHashMap<>();
-                    for (int i = 0; i < rowList.size(); i++) {
-                        String colName = (fieldKeys != null && i < fieldKeys.size()) ? fieldKeys.get(i) : "col_" + i;
-                        record.put(colName, rowList.get(i));
+                    // 但 JsonPath 写成 $.* 时，整个数据数组会被当成"一行"传进来（元素是对象），
+                    // 那样会把 N 行数据当成 N 列，这里识别出来逐个展开
+                    if (!rowList.isEmpty() && rowList.get(0) instanceof Map<?, ?> firstRow) {
+                        for (Object rowItem : rowList) {
+                            if (rowItem instanceof Map<?, ?> rowMap) {
+                                records.add(projectRecord(rowMap, fieldKeys));
+                            }
+                        }
+                    } else {
+                        Map<String, Object> record = new LinkedHashMap<>();
+                        for (int i = 0; i < rowList.size(); i++) {
+                            String colName = (fieldKeys != null && i < fieldKeys.size()) ? fieldKeys.get(i) : "col_" + i;
+                            record.put(colName, rowList.get(i));
+                        }
+                        records.add(record);
                     }
-                    records.add(record);
                 }
             }
         } else if (extracted instanceof Map<?, ?> map) {
-            Map<String, Object> record = new LinkedHashMap<>();
-            map.forEach((k, v) -> record.put(String.valueOf(k), v));
-            records.add(record);
+            records.add(projectRecord(map, fieldKeys));
         }
         // 金蝶 ExecuteBillQuery 出错时返回 [[{"Result":{"ResponseStatus":{...}}}]]，
         // 错误对象藏在数据格子里，根节点检查不到，这里逐格兜底
         assertNoCellBusinessError(records);
         return records;
+    }
+
+    /**
+     * 按配置的 FieldKeys 裁剪记录，保持配置顺序。
+     *
+     * <p>金蝶报表接口就算传了 FieldKeys，也可能把过滤方案的全部列都返回（实测 868 列），
+     * 不裁剪会按 800+ 列去建临时表，直接撞 InnoDB 行大小上限。
+     * FieldKeys 为空或一个都对不上时保留原样，避免误裁。
+     */
+    private Map<String, Object> projectRecord(Map<?, ?> map, List<String> fieldKeys) {
+        Map<String, Object> record = new LinkedHashMap<>();
+        if (fieldKeys != null && !fieldKeys.isEmpty()) {
+            for (String key : fieldKeys) {
+                if (map.containsKey(key)) {
+                    record.put(key, map.get(key));
+                }
+            }
+            log.debug("[WebAPI] 记录裁剪: 原始列={}, 配置字段={}, 命中={}",
+                    map.size(), fieldKeys.size(), record.size());
+            if (!record.isEmpty()) {
+                return record;
+            }
+        }
+        map.forEach((k, v) -> record.put(String.valueOf(k), v));
+        return record;
     }
 
     /**

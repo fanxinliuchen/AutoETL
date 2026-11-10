@@ -132,13 +132,24 @@ class PaginationConfigTest {
     }
 
     @Test
-    @DisplayName("显式配置过路径时不自动覆盖")
-    void keepCustomPath() {
+    @DisplayName("路径与报文体结构冲突时以结构为准（避免凭空造出 data 节点）")
+    void overridePathWhenStructureMismatch() {
         PaginationConfig config = PaginationConfig.parse(
                 "{\"enabled\":true,\"offsetPath\":\"data.StartRow\",\"limitPath\":\"data.Limit\"}");
         JSONObject body = JSONUtil.parseObj("{\"parameters\":[{\"StartRow\":0}]}");
         config.adaptToRequestBody(body);
-        assertEquals("data.StartRow", config.getOffsetPath());
+        assertEquals("parameters[0].StartRow", config.getOffsetPath());
+        assertEquals("parameters[0].Limit", config.getLimitPath());
+    }
+
+    @Test
+    @DisplayName("与报文体结构一致的显式路径保持不变")
+    void keepCustomPath() {
+        PaginationConfig config = PaginationConfig.parse(
+                "{\"enabled\":true,\"offsetPath\":\"parameters[0].StartRow\",\"limitPath\":\"parameters[0].Limit\"}");
+        JSONObject body = JSONUtil.parseObj("{\"parameters\":[{\"StartRow\":0}]}");
+        config.adaptToRequestBody(body);
+        assertEquals("parameters[0].StartRow", config.getOffsetPath());
     }
 
     @Test

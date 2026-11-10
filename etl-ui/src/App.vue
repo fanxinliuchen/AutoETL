@@ -91,7 +91,7 @@
                       <div style="display: flex; align-items: center; gap: 6px">
                         <span class="p-name" @click="openEditPipeline(record)">{{ record.pipelineName }}</span>
                         <a-tag
-                          v-if="!record.targetDsId || !record.targetTable || !record.transformSql"
+                          v-if="!isPipelineRunnable(record)"
                           color="orange"
                           style="font-size: 11px; margin: 0; padding: 0 4px"
                         >
@@ -136,20 +136,20 @@
                   <!-- 操作列 -->
                   <template v-else-if="column.dataIndex === 'action'">
                     <a-space>
-                      <a-tooltip :title="(!record.targetDsId || !record.targetTable || !record.transformSql) ? '该流程为草稿状态，请先编辑完善后再运行' : '立即手动运行一次'">
+                      <a-tooltip :title="!isPipelineRunnable(record) ? '该流程为草稿状态，请先编辑完善后再运行' : '立即手动运行一次'">
                         <a-popconfirm
-                          :disabled="!record.targetDsId || !record.targetTable || !record.transformSql"
+                          :disabled="!isPipelineRunnable(record)"
                           title="确定立即触发运行该流程？"
                           @confirm="onRunPipeline(record.id)"
                         >
                           <a-button
                             type="link"
                             size="small"
-                            :disabled="!record.targetDsId || !record.targetTable || !record.transformSql"
+                            :disabled="!isPipelineRunnable(record)"
                           >
                             <play-circle-outlined
                               :style="{
-                                color: (!record.targetDsId || !record.targetTable || !record.transformSql) ? '#bfbfbf' : '#52c41a',
+                                color: !isPipelineRunnable(record) ? '#bfbfbf' : '#52c41a',
                                 fontSize: '15px'
                               }"
                             /> 运行
@@ -320,6 +320,12 @@ const openEditPipeline = (record: EtlPipeline) => {
     pipelineEditorRef.value?.open(record)
   })
 }
+
+/**
+ * 可运行判定，与后端 PipelineExecutor 保持一致：
+ * 只要求目标数仓 + 目标表；转换 SQL 允许为空（系统按目标表结构自动生成 INSERT）
+ */
+const isPipelineRunnable = (record: EtlPipeline) => !!(record.targetDsId && record.targetTable)
 
 const onEditorSuccess = () => {
   currentView.value = 'list'

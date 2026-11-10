@@ -50,6 +50,10 @@ public class MySqlDwLoader {
 
         DataSource ds = datasourceService.getDataSource(targetDsId);
         List<String> columns = new ArrayList<>(rows.get(0).keySet());
+        if (logBuffer != null) {
+            logBuffer.append("[暂存] 本次入库列数: ").append(columns.size())
+                    .append("，示例: ").append(columns.subList(0, Math.min(5, columns.size()))).append("\n");
+        }
 
         try (Connection conn = ds.getConnection()) {
             // 确保临时中转表存在（含类型校验与结构重建）
@@ -125,10 +129,30 @@ public class MySqlDwLoader {
                     .append(entry.getValue()).append(" NULL, ");
         }
         ddl.setLength(ddl.length() - 2);
-        ddl.append(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;");
+        // 显式 DYNAMIC：字段多（几十列 TEXT/VARCHAR）时，COMPACT 行格式会把每列前缀存在行内，
+        // 直接触发 "Row size too large (> 8126)"，DYNAMIC 则把大字段整体挪到溢出页
+        ddl.append(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC;");
 
         try (Statement stmt = conn.createStatement()) {
             stmt.execute(ddl.toString());
+        } catch (java.sql.SQLException e) {
+            // 建表失败时把版本/字符集/行格式带出来，行数多了容易出现行大小或兼容性问题
+            String version = "unknown";
+            String charset = "unknown";
+            try {
+                version = conn.getMetaData().getDatabaseProductVersion();
+                try (Statement s = conn.createStatement();
+                     ResultSet rs = s.executeQuery(
+                             "SELECT @@character_set_database, @@collation_database, @@innodb_default_row_format")) {
+                    if (rs.next()) {
+                        charset = rs.getString(1) + "/" + rs.getString(2) + ", default_row_format=" + rs.getString(3);
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+            throw new java.sql.SQLException(
+                    "创建临时表失败: " + e.getMessage() + "；列数=" + expected.size()
+                            + "，服务端版本=" + version + "，库字符集=" + charset, e);
         }
 
         if (logBuffer != null && (!exists || rebuilt)) {

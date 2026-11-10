@@ -167,13 +167,18 @@ public class PaginationConfig {
      * 未显式配置路径时按报文自动切换，避免两处配置打架。
      */
     public void adaptToRequestBody(JSONObject body) {
-        if (body == null || pathCustomized) {
+        if (body == null) {
             return;
         }
-        if (body.containsKey("parameters")) {
-            setOffsetPath("parameters[0].StartRow");
-            setLimitPath("parameters[0].Limit");
-        } else {
+        // 报文体结构优先：保存时可能沿用上一种方式的路径（例如从标准查询切到报表方案后
+        // 仍存着 data.StartRow），继续按旧路径写会凭空造出一个 data 节点，金蝶会忽略 FieldKeys
+        boolean reportStyle = body.containsKey("parameters");
+        if (reportStyle) {
+            if (!offsetPath.startsWith("parameters")) {
+                setOffsetPath("parameters[0].StartRow");
+                setLimitPath("parameters[0].Limit");
+            }
+        } else if (offsetPath.startsWith("parameters")) {
             setOffsetPath("data.StartRow");
             setLimitPath("data.Limit");
         }

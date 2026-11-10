@@ -3122,6 +3122,23 @@ const syncKingdeeQueryToBody = () => {
       syncPagination()
     }
   }
+
+  // 数据路径与分页路径随报文体切换：
+  // 报表返回 {"success":true,"data":[..],"TotalCount":n}，数据在 $.data；
+  // 标准查询返回裸二维数组，用 $.* 逐行取。路径写错会把整包响应当成一行解析。
+  if (bodyMode.value === 'REPORT') {
+    if (!formData.value.apiDataPath || formData.value.apiDataPath === '$.*') {
+      formData.value.apiDataPath = '$.data'
+    }
+    pagination.value.offsetPath = 'parameters[0].StartRow'
+    pagination.value.limitPath = 'parameters[0].Limit'
+  } else {
+    if (formData.value.apiDataPath === '$.data') {
+      formData.value.apiDataPath = '$.*'
+    }
+    pagination.value.offsetPath = 'data.StartRow'
+    pagination.value.limitPath = 'data.Limit'
+  }
 }
 
 // 由 FieldKeys 串重建表格行（保留已存在行的中文名/类型/启用/备注）

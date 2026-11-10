@@ -233,7 +233,8 @@ public class TargetTableSchemaService {
                     .append("),\n");
         }
         ddl.setLength(ddl.length() - 2);
-        ddl.append("\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci");
+        // 字段多时 COMPACT 行格式会报 "Row size too large"，显式指定 DYNAMIC
+        ddl.append("\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC");
         return ddl.toString();
     }
 
