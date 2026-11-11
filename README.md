@@ -134,7 +134,34 @@ E:\3-code\ERPwebAPI/
 
 > 前端所有 `/etl/**` 请求由 Vite 代理转发到 `http://localhost:8388`，因此对外只需暴露 3800 一个端口即可访问完整系统。
 
-### 1. 数据库初始化
+### 1. 一键启停（推荐）
+
+项目根目录提供三个脚本，双击即可，也可在命令行执行：
+
+| 脚本 | 作用 |
+|---|---|
+| `start-all.bat` | 依次拉起 MySQL(3306) → etl-server(8388) → etl-ui(3800)；**已在监听的自动跳过**，可反复执行 |
+| `stop-all.bat` | 按端口停掉前端与后端（含子进程），再 `mysqladmin shutdown` 优雅关闭 MySQL，失败才强杀 |
+| `status.bat` | 打印三个端口的占用/PID，并实际请求后端接口与前端首页给出 HTTP 状态 |
+
+```bat
+cd /d E:\3-code\ERPwebAPI
+start-all.bat
+```
+
+说明：
+
+* 后端与前端各会打开一个命令行窗口，**关掉窗口即停止服务**，日志也留在窗口里，排障方便。
+* MySQL 便携版没有注册 Windows 服务，由脚本以最小化窗口启动。
+* `stop-all.bat` 需要 MySQL root 密码，取值顺序：**第 1 个参数 → 环境变量 `MYSQL_ROOT_PWD` → 默认 `Root123456`**，密码不会回显：
+
+  ```bat
+  stop-all.bat 你的密码
+  ```
+
+* 启动脚本只判断端口，不做健康检查以外的校验；若某个服务反复起来，先用 `status.bat` 看端口，再看对应窗口的报错。
+
+### 2. 数据库初始化（脚本已封装，排障时可逐条手工执行）
 
 本机数据库为**便携版 MySQL 8.4**（未注册 Windows 服务），位于 `E:\3-code\MySQL`：
 
@@ -156,7 +183,7 @@ E:\3-code\MySQL\mysql-8.4.11-winx64\bin\mysql.exe -h 127.0.0.1 -P 3306 -u root -
 - `t_etl_alert_config`：企业微信 / 钉钉 / 飞书告警配置表
 - `t_etl_kingdee_credential`：金蝶登录凭证表（密码 AES 加密）
 
-### 2. 启动后端服务 (etl-server)
+### 3. 启动后端服务 (etl-server)
 ```bash
 cd E:\3-code\ERPwebAPI\etl-server
 
@@ -167,7 +194,7 @@ mvn spring-boot:run
 * **Swagger 在线 API 文档**：[http://localhost:8388/swagger-ui.html](http://localhost:8388/swagger-ui.html)
 * **默认本地连接**：`application-local.yml`（可通过系统环境变量 `DB_PASSWORD`、`DB_HOST` 等覆盖）
 
-### 3. 启动前端控制台 (etl-ui)
+### 4. 启动前端控制台 (etl-ui)
 ```bash
 cd E:\3-code\ERPwebAPI\etl-ui
 
