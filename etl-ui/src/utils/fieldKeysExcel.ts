@@ -45,7 +45,8 @@ export function createRow(patch: Partial<FieldRow> = {}): FieldRow {
     rid: `fr_${ridSeed}`,
     fieldKey: '',
     label: '',
-    type: 'TEXT',
+    // 默认 VARCHAR(255)：TEXT 列无法建索引、临时表体积也大，绝大多数金蝶字段 255 足够
+    type: 'VARCHAR(255)',
     enabled: true,
     remark: '',
     ...patch
@@ -130,7 +131,7 @@ export function downloadFieldTemplate() {
     ['2. 一行一个字段；行顺序就是 FieldKeys 顺序，也是临时表的列顺序。'],
     ['3. 字段名只允许字母、数字、下划线和点，不能含空格、逗号或中文。'],
     ['4. 「启用」填否的行不进入 FieldKeys，但会保留在清单里，可随时恢复。'],
-    ['5. 「类型」为预留列，当前版本仅记录、不参与建表；后续版本生效。'],
+    ['5. 「类型」留空默认 VARCHAR(255)；可选 TEXT / BIGINT / INT / DECIMAL(n,m) / DATE / DATETIME。TEXT 只建议给超长文本，它不能建索引、临时表也更大。'],
     ['6. 重复字段名只保留第一条，重复行会给出提示。'],
     ['7. 表头行可保留，也可删除；系统按表头名称识别各列。']
   ]
@@ -149,7 +150,7 @@ export function downloadFieldTemplate() {
  */
 export function inferFieldType(fieldKey: string): string {
   const key = (fieldKey || '').toUpperCase()
-  if (!key) return 'TEXT'
+  if (!key) return 'VARCHAR(255)'
   const leaf = key.includes('.') ? key.slice(key.lastIndexOf('.') + 1) : key
   if (leaf.endsWith('ID') || leaf === 'FID') return 'BIGINT'
   // 日期统一 DATETIME：金蝶返回 2026-11-09T10:30:00，落 DATE 列会静默丢掉时分秒
@@ -180,7 +181,7 @@ export function inferFieldType(fieldKey: string): string {
     fields: rows.map((r) => ({
       k: r.fieldKey.trim(),
       label: r.label || '',
-      type: r.type || 'TEXT',
+      type: r.type || 'VARCHAR(255)',
       enabled: !!r.enabled,
       remark: r.remark || ''
     }))
@@ -218,7 +219,7 @@ export function fieldRowsFromMeta(metaJson: string | undefined, fieldKeys: strin
       createRow({
         fieldKey: key,
         label: String(f?.label ?? '').slice(0, 64),
-        type: String(f?.type ?? 'TEXT').toUpperCase() || 'TEXT',
+        type: String(f?.type ?? 'VARCHAR(255)').toUpperCase() || 'VARCHAR(255)',
         enabled: keySet.has(upper),
         remark: String(f?.remark ?? '').slice(0, 128)
       })
@@ -356,15 +357,15 @@ export function parseMatrix(aoa: any[][]): ParseResult {
 
     let type = normCell(cols.type >= 0 ? row[cols.type] : '').toUpperCase()
     if (type && !FIELD_TYPE_OPTIONS.includes(type)) {
-      warnings.push(`第 ${rowNo} 行：类型「${type}」不在推荐列表，已置为 TEXT`)
-      type = 'TEXT'
+      warnings.push(`第 ${rowNo} 行：类型「${type}」不在推荐列表，已置为 VARCHAR(255)`)
+      type = 'VARCHAR(255)'
     }
 
     rows.push(
       createRow({
         fieldKey: key,
         label: normCell(cols.label >= 0 ? row[cols.label] : '').slice(0, 64),
-        type: type || 'TEXT',
+        type: type || 'VARCHAR(255)',
         enabled: cols.enabled >= 0 ? parseEnabled(row[cols.enabled]) : true,
         remark: normCell(cols.remark >= 0 ? row[cols.remark] : '').slice(0, 128)
       })

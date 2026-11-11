@@ -323,8 +323,8 @@ pnpm dev
   * **从金蝶拉字段**：登录 K3Cloud 后调用 `DynamicFormService.QueryBusinessInfo`，自动带出表单全部字段的标识、中文名与数据类型，勾选后「追加」或「覆盖」到清单。首次拉取只预勾选清单里还没有的字段，避免覆盖手工调整。
     * 仅对**单据类**表单有效。报表 / 账表没有 `QueryBusinessInfo` 元数据，弹窗会直接说明原因（不再发一次必然失败的请求），
       此时改用「从报表试取字段」或 Excel 导入。
-    * **推断类型**：按字段名规则推断（`FID`/`*Id`→`BIGINT`、`*Date`→`DATE`、`*Time`→`DATETIME`、`*Amount`/`*Qty`/`*Price`→`DECIMAL(18,4)`…），只填充仍为 `TEXT` 的行。
-    * 「中文名」「类型」随流程保存在 `t_etl_pipeline.field_meta`（JSON）。**类型会用于创建 Staging 临时表列**（如 `DECIMAL(18,4)`、`DATETIME`），未指定的列仍为 `TEXT`；类型白名单之外的取值一律降级为 `TEXT`。改动类型后，下次运行会自动比对并重建临时表。
+    * **推断类型**：按字段名规则推断（`FID`/`*Id`→`BIGINT`、`*Date`→`DATE`、`*Time`→`DATETIME`、`*Amount`/`*Qty`/`*Price`→`DECIMAL(18,4)`…），只填充还没有明确类型的行（空值，或仍是默认的 `VARCHAR(255)` / 历史默认 `TEXT`）。
+    * 「中文名」「类型」随流程保存在 `t_etl_pipeline.field_meta`（JSON）。**类型会用于创建 Staging 临时表列**（如 `DECIMAL(18,4)`、`DATETIME`）。新增/导入字段默认 `VARCHAR(255)`；类型留空的列同样按 `VARCHAR(255)` 建表，类型白名单之外的取值一律降级为 `TEXT`（避免截断长文本）。改动类型后，下次运行会自动比对并重建临时表。
 
 ### 2. SQL 转换与动态变量 (Transform)
 用户编写的 SQL 处理脚本在目标数仓环境中执行，支持使用分号 `;` 分隔多段 SQL。

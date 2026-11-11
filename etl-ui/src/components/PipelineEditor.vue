@@ -2551,7 +2551,7 @@ const parseKeysLower = (keys?: string) =>
 const sourceFields = computed(() => {
   const list = fieldRows.value
     .filter((r) => r.fieldKey.trim() && r.enabled)
-    .map((r) => ({ name: r.fieldKey.trim(), type: r.type || 'TEXT' }))
+    .map((r) => ({ name: r.fieldKey.trim(), type: r.type || 'VARCHAR(255)' }))
   if (formData.value.writeMode === 'SYNC') {
     const sd = (syncConfig.value.softDeleteColumn || 'is_deleted').trim()
     const sdt = (syncConfig.value.softDeleteTimeColumn || '').trim()
@@ -2693,7 +2693,7 @@ const schemaModal = ref({
 const openSchemaModal = () => {
   const add = mappingRows.value
     .filter((r) => r.status === 'MISSING_IN_TARGET' && r.sourceName)
-    .map((r) => ({ name: r.sourceName as string, type: r.sourceType || 'TEXT' }))
+    .map((r) => ({ name: r.sourceName as string, type: r.sourceType || 'VARCHAR(255)' }))
   const drop = mappingRows.value
     .filter((r) => r.status === 'MISSING_IN_SOURCE' && r.targetName)
     .map((r) => r.targetName as string)
@@ -3497,6 +3497,12 @@ const toggleAllKingdeeFields = (checked: boolean) => {
   })
 }
 
+// 没有明确指定过类型的行：空值，或仍是历史/新建时的默认值（TEXT、VARCHAR(255)）
+const isTypeUnset = (type?: string) => {
+  const t = String(type || '').toUpperCase()
+  return !t || t === 'TEXT' || t === 'VARCHAR(255)'
+}
+
 // append: 只补清单里没有的字段；replace: 用所选字段整体替换清单
 const applyKingdeeFields = (mode: 'append' | 'replace') => {
   const picked = kingdeeFields.value.filter((f) => f.checked && f.key)
@@ -3506,7 +3512,7 @@ const applyKingdeeFields = (mode: 'append' | 'replace') => {
   }
   if (mode === 'replace') {
     fieldRows.value = picked.map((f) =>
-      createRow({ fieldKey: f.key, label: f.label || '', type: f.type || 'TEXT', enabled: true })
+      createRow({ fieldKey: f.key, label: f.label || '', type: f.type || 'VARCHAR(255)', enabled: true })
     )
   } else {
     const existing = new Set(fieldRows.value.map((r) => r.fieldKey.trim().toUpperCase()))
@@ -3516,12 +3522,12 @@ const applyKingdeeFields = (mode: 'append' | 'replace') => {
         const row = fieldRows.value.find((r) => r.fieldKey.trim().toUpperCase() === upper)
         if (row) {
           if (!row.label) row.label = f.label || ''
-          if (!row.type || row.type === 'TEXT') row.type = f.type || row.type
+          if (isTypeUnset(row.type)) row.type = f.type || row.type
         }
         return
       }
       fieldRows.value.push(
-        createRow({ fieldKey: f.key, label: f.label || '', type: f.type || 'TEXT', enabled: true })
+        createRow({ fieldKey: f.key, label: f.label || '', type: f.type || 'VARCHAR(255)', enabled: true })
       )
       existing.add(upper)
     })
@@ -3531,7 +3537,7 @@ const applyKingdeeFields = (mode: 'append' | 'replace') => {
   message.success(`已${mode === 'replace' ? '覆盖' : '追加'} ${picked.length} 个字段`)
 }
 
-// 只填充还没有明确类型（空或 TEXT）的行，避免覆盖手工设置
+// 只填充还没有明确类型的行（空 / 默认 TEXT / 默认 VARCHAR(255)），避免覆盖手工设置
 const handleInferTypes = () => {
   if (!fieldRows.value.length) {
     message.warning('请先添加字段')
@@ -3540,7 +3546,7 @@ const handleInferTypes = () => {
   let changed = 0
   fieldRows.value.forEach((row) => {
     if (!row.fieldKey.trim()) return
-    if (!row.type || row.type === 'TEXT') {
+    if (isTypeUnset(row.type)) {
       row.type = inferFieldType(row.fieldKey)
       changed += 1
     }

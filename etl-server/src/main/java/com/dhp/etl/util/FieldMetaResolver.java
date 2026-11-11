@@ -28,8 +28,8 @@ public final class FieldMetaResolver {
     }
 
     /**
-     * 解析 field_meta，返回「列名 -> 归一化类型」；未启用或无类型的列按 TEXT 处理。
-     * 解析失败时不抛异常，整体退回 TEXT，避免因元数据损坏阻断抽取。
+     * 解析 field_meta，返回「列名 -> 归一化类型」；未填类型的列按 VARCHAR(255) 处理。
+     * 解析失败时不抛异常，整体退回 VARCHAR(255)，避免因元数据损坏阻断抽取。
      */
     public static Map<String, String> parseColumnTypes(String fieldMetaJson) {
         Map<String, String> result = new LinkedHashMap<>();
@@ -57,17 +57,17 @@ public final class FieldMetaResolver {
                 result.put(key, normalizeType(field.getStr("type")));
             }
         } catch (Exception e) {
-            log.warn("field_meta 解析失败，临时表将全部按 TEXT 建表: {}", e.getMessage());
+            log.warn("field_meta 解析失败，临时表将全部按 VARCHAR(255) 建表: {}", e.getMessage());
         }
         return result;
     }
 
     /**
-     * 类型归一化（白名单）。非法或越界一律降级为 TEXT。
+     * 类型归一化（白名单）。未填类型按 VARCHAR(255)，非法或越界降级为 TEXT（保数据不截断）。
      */
     public static String normalizeType(String raw) {
         if (StrUtil.isBlank(raw)) {
-            return "TEXT";
+            return "VARCHAR(255)";
         }
         String type = raw.trim().toUpperCase().replaceAll("\\s+", "");
         switch (type) {

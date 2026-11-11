@@ -472,7 +472,7 @@ public class KingdeeMetadataClient {
     public static String inferTypeByKey(String fieldKey) {
         String key = StrUtil.nullToEmpty(fieldKey).toUpperCase();
         if (StrUtil.isBlank(key)) {
-            return "TEXT";
+            return "VARCHAR(255)";
         }
         String leaf = key.contains(".") ? key.substring(key.lastIndexOf('.') + 1) : key;
         if (leaf.endsWith("ID") || leaf.equals("FID")) {

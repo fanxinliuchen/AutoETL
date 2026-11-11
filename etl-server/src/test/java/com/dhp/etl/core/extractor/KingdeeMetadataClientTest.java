@@ -202,7 +202,7 @@ class KingdeeMetadataClientTest {
         assertEquals("VARCHAR(16)", KingdeeMetadataClient.inferTypeByKey("FIsIncludedTax"));
         assertEquals("VARCHAR(16)", KingdeeMetadataClient.inferTypeByKey("FISPRICEEXCLUDETAX"));
         assertEquals("DECIMAL(18,4)", KingdeeMetadataClient.inferTypeByKey("FBillTaxAmount"));
-        assertEquals("TEXT", KingdeeMetadataClient.inferTypeByKey(""));
+        assertEquals("VARCHAR(255)", KingdeeMetadataClient.inferTypeByKey(""));
     }
 
     /** 报表类表单（STK_StockSummaryRpt）的真实返回：有 ResponseStatus，但没有任何字段定义 */
