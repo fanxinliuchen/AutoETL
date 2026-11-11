@@ -135,6 +135,10 @@ public class PipelineExecutor {
             String stageTable = "stg_" + pipeline.getPipelineCode().toLowerCase();
             boolean autoTransform = StrUtil.isBlank(pipeline.getTransformSql());
             Map<String, String> columnTypes = FieldMetaResolver.parseColumnTypes(pipeline.getFieldMeta());
+            // 附加列同样要建进临时表，类型取配置（未配置按 VARCHAR(255)）
+            for (RequestVarResolver.ExtraColumn extra : RequestVarResolver.parseExtraColumns(pipeline.getFilterMeta())) {
+                columnTypes.putIfAbsent(extra.getName(), FieldMetaResolver.normalizeType(extra.getType()));
+            }
 
             // 1. SQL 预检安全守卫（每轮不变，只做一次）
             logBuffer.append("[校验] 执行 SQL AST 安全白名单校验...\n");
@@ -252,6 +256,12 @@ public class PipelineExecutor {
         // 清空旧的临时表
         mySqlDwLoader.truncateStageTable(pipeline.getTargetDsId(), stageTable);
 
+        // 附加列：每轮算一次（变量可能随循环参数变化），再补到每行
+        Map<String, String> extraValues = requestVarResolver.resolveExtraColumns(pipeline, logBuffer, loopVars);
+        if (!extraValues.isEmpty()) {
+            logBuffer.append("[附加列] ").append(extraValues).append("\n");
+        }
+
         long readCount;
         if (pipeline.getSourceType() == SourceTypeEnum.MYSQL) {
             if (pipeline.getSourceDsId() == null || StrUtil.isBlank(pipeline.getSourceQuerySql())) {
@@ -263,13 +273,17 @@ public class PipelineExecutor {
             readCount = mySqlExtractor.extractInBatches(
                     srcDs,
                     sourceSql,
-                    (batch, buf) -> mySqlDwLoader.batchInsertToStage(pipeline.getTargetDsId(), stageTable, batch, columnTypes, buf),
+                    (batch, buf) -> {
+                        injectExtraColumns(batch, extraValues);
+                        mySqlDwLoader.batchInsertToStage(pipeline.getTargetDsId(), stageTable, batch, columnTypes, buf);
+                    },
                     logBuffer
             );
         } else {
             List<Map<String, Object>> apiRecords = webApiExtractor.extract(pipeline, logBuffer, loopVars);
             readCount = apiRecords.size();
             if (CollUtil.isNotEmpty(apiRecords)) {
+                injectExtraColumns(apiRecords, extraValues);
                 mySqlDwLoader.batchInsertToStage(pipeline.getTargetDsId(), stageTable, apiRecords, columnTypes, logBuffer);
             }
         }
@@ -308,6 +322,21 @@ public class PipelineExecutor {
         // 清空临时表
         mySqlDwLoader.truncateStageTable(pipeline.getTargetDsId(), stageTable);
         return new long[]{readCount, affectedRows};
+    }
+
+    /**
+     * 把附加列补进每一行；抽取结果里已有同名列时不覆盖（以源数据为准）
+     */
+    private void injectExtraColumns(List<Map<String, Object>> rows, Map<String, String> extraValues) {
+        if (CollUtil.isEmpty(rows) || extraValues == null || extraValues.isEmpty()) {
+            return;
+        }
+        for (Map<String, Object> row : rows) {
+            if (row == null) {
+                continue;
+            }
+            extraValues.forEach(row::putIfAbsent);
+        }
     }
 
     /**

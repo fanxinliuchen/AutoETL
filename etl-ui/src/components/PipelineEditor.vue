@@ -1226,13 +1226,80 @@
                       </a-col>
                     </a-row>
 
-                    <a-alert
-                      message="💡 智能二维数组映射特性"
-                      description="金蝶 ExecuteBillQuery 原生返回二维数组格式。系统抽取引擎已内置智能列对齐机制：自动将 FieldKeys 中的字段名与二维数组按序号精准匹配，还原为规整的行记录对象，并无缝加载进步骤三的临时表 ${stage_table}！"
-                      type="info"
-                      show-icon
-                      style="margin-top: 8px"
-                    />
+                    <!-- 附加字段：抽取字段之外，额外写入数仓的列 -->
+                    <div class="extra-box">
+                      <div class="extra-head">
+                        <span class="extra-title">附加字段</span>
+                        <span class="extra-hint">
+                          除抽取字段外，额外写入数仓的列（如 begindate / enddate 这类时间变量）
+                        </span>
+                        <a-button size="small" type="link" @click="addExtraColumn">
+                          <plus-outlined /> 添加列
+                        </a-button>
+                      </div>
+                      <div v-for="(col, index) in extraColumns" :key="col.rid" class="filt-row">
+                        <a-input
+                          v-model:value="col.name"
+                          size="small"
+                          class="fk-input-mono"
+                          placeholder="列名，如 begindate"
+                          style="flex: 1; min-width: 150px"
+                          @change="onExtraColumnsChanged"
+                        />
+                        <a-select
+                          v-model:value="col.valueType"
+                          size="small"
+                          style="width: 96px; flex: none"
+                          :options="[
+                            { label: '变量', value: 'VARIABLE' },
+                            { label: '常量', value: 'CONSTANT' }
+                          ]"
+                          @change="onExtraColumnsChanged"
+                        />
+                        <a-auto-complete
+                          v-if="col.valueType === 'VARIABLE'"
+                          v-model:value="col.value"
+                          size="small"
+                          class="fk-input-mono"
+                          :options="variableOptions"
+                          placeholder="变量名，如 begindate"
+                          style="flex: 1; min-width: 160px"
+                          @change="onExtraColumnsChanged"
+                        />
+                        <a-input
+                          v-else
+                          v-model:value="col.value"
+                          size="small"
+                          class="fk-input-mono"
+                          placeholder="常量值，可写 ${变量}"
+                          style="flex: 1; min-width: 160px"
+                          @change="onExtraColumnsChanged"
+                        />
+                        <a-select
+                          v-model:value="col.type"
+                          size="small"
+                          style="width: 130px; flex: none"
+                          :options="fieldTypeSelectOptions"
+                          @change="onExtraColumnsChanged"
+                        />
+                        <a-button
+                          size="small"
+                          type="link"
+                          danger
+                          style="flex: none"
+                          @click="removeExtraColumn(index)"
+                        >
+                          删除
+                        </a-button>
+                      </div>
+                      <div v-if="!extraColumns.length" class="filt-empty">
+                        未配置附加列：只写入从接口抽取到的字段
+                      </div>
+                      <div class="fk-hint">
+                        列名会用于建临时表与入库，只允许字母/数字/下划线；选「变量」取上方变量定义（运行时按 SQL
+                        计算），时间类变量列类型建议选 DATE / DATETIME。字段映射里会同步出现这些列，可用「更新目标表」一键建到数仓。
+                      </div>
+                    </div>
                   </a-card>
                 </div>
 
@@ -2332,6 +2399,41 @@ const defaultFilterVariable = (): FilterVariable => {
 const filterConditions = ref<FilterCondition[]>([])
 const filterVariables = ref<FilterVariable[]>([])
 
+// ===== 附加列：除抽取字段外，额外写进数仓的列（如 begindate / enddate 这类时间变量）=====
+type ExtraValueType = 'VARIABLE' | 'CONSTANT'
+
+interface ExtraColumn {
+  rid: string
+  name: string
+  valueType: ExtraValueType
+  value: string
+  /** 建临时表/目标表用的列类型 */
+  type: string
+}
+
+const extraColumns = ref<ExtraColumn[]>([])
+let extraRidSeed = 0
+
+const defaultExtraColumn = (): ExtraColumn => {
+  extraRidSeed += 1
+  return { rid: `ec_${extraRidSeed}`, name: '', valueType: 'VARIABLE', value: '', type: 'VARCHAR(255)' }
+}
+
+const addExtraColumn = () => {
+  extraColumns.value.push(defaultExtraColumn())
+}
+
+const removeExtraColumn = (index: number) => {
+  extraColumns.value.splice(index, 1)
+  onExtraColumnsChanged()
+}
+
+// 附加列改动后立即落进 filter_meta，字段映射左侧也会同步出现
+const onExtraColumnsChanged = () => {
+  formData.value.filterMeta = buildFilterMeta()
+}
+
+
 // ===== 循环取数：循环 SQL 返回多行，每行跑一轮完整流程 =====
 interface LoopConfigForm {
   enabled: boolean
@@ -2459,6 +2561,12 @@ const sourceFields = computed(() => {
     if (sdt && !list.some((i) => i.name.toLowerCase() === sdt.toLowerCase())) {
       list.push({ name: sdt, type: 'DATETIME' })
     }
+  }
+  // 附加列也要出现在映射左侧，才能通过「更新目标表」把列建到数仓
+  for (const col of extraColumns.value) {
+    const name = col.name.trim()
+    if (!name || list.some((i) => i.name.toLowerCase() === name.toLowerCase())) continue
+    list.push({ name, type: col.type || 'VARCHAR(255)' })
   }
   return list
 })
@@ -2713,6 +2821,15 @@ const buildFilterMeta = () =>
     variables: filterVariables.value
       .map((v) => ({ name: v.name.trim(), sql: v.sql.trim() }))
       .filter((v) => v.name && v.sql),
+    // 附加列：落库时补进每一行的额外字段（变量 / 常量）
+    extraColumns: extraColumns.value
+      .map((c) => ({
+        name: c.name.trim(),
+        valueType: c.valueType,
+        value: c.value.trim(),
+        type: c.type || 'VARCHAR(255)'
+      }))
+      .filter((c) => c.name),
     loop: loopConfig.value.enabled
       ? {
           enabled: true,
@@ -2851,6 +2968,7 @@ const loadFilter = (preserveMode = false) => {
   }
   let conditions: FilterCondition[] | null = null
   filterVariables.value = []
+  extraColumns.value = []
   loopConfig.value = defaultLoopConfig()
   loopPreview.value = null
   bodyModeSel.value = 'AUTO'
@@ -2859,6 +2977,18 @@ const loadFilter = (preserveMode = false) => {
       const parsed = JSON.parse(formData.value.filterMeta)
       if (parsed?.mode === 'text') {
         filterMode.value = 'text'
+      }
+      // 附加列：老流程没有该字段时为空
+      if (Array.isArray(parsed?.extraColumns)) {
+        extraColumns.value = parsed.extraColumns
+          .filter((c: any) => c && String(c.name ?? '').trim())
+          .map((c: any) => ({
+            rid: `ec_${++extraRidSeed}`,
+            name: String(c.name ?? '').trim(),
+            valueType: c.valueType === 'CONSTANT' ? 'CONSTANT' : 'VARIABLE',
+            value: String(c.value ?? ''),
+            type: String(c.type ?? 'VARCHAR(255)')
+          }))
       }
       // 取数方式：老流程没有该字段时按「自动识别」处理
       if (['AUTO', 'STANDARD', 'REPORT'].includes(parsed?.bodyMode)) {
@@ -4300,7 +4430,6 @@ defineExpose({ open })
   min-height: 22px;
   font-size: 12px;
 }
-
 .detect-tag {
   margin: 0;
 }
@@ -4312,6 +4441,40 @@ defineExpose({ open })
 .detect-reason {
   color: #8c8c8c;
   line-height: 1.6;
+}
+
+/* 附加字段配置区 */
+.extra-box {
+  margin-top: 12px;
+  padding: 10px 12px 12px;
+  border: 1px dashed #d9d9d9;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.extra-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.extra-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #262626;
+}
+
+.extra-hint {
+  flex: 1;
+  min-width: 200px;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.extra-box .filt-row + .filt-row {
+  margin-top: 6px;
 }
 
 .fk-input-mono :deep(input) {

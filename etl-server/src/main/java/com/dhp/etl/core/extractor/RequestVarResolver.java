@@ -50,6 +50,9 @@ public class RequestVarResolver {
     /** 变量名白名单：字母/下划线开头，仅含字母数字下划线 */
     private static final Pattern NAME_PATTERN = Pattern.compile("^[A-Za-z_][A-Za-z0-9_]{0,31}$");
 
+    /** 附加列列名白名单（会用于建表与 INSERT，禁止注入） */
+    private static final Pattern COLUMN_PATTERN = Pattern.compile("^[A-Za-z_][A-Za-z0-9_]{0,63}$");
+
     /** 变量 SQL 的长度上限，防止有人往里塞整段脚本 */
     private static final int MAX_SQL_LENGTH = 1000;
 
@@ -160,6 +163,85 @@ public class RequestVarResolver {
             throw new BizException(ErrorCode.PARAM_ERROR,
                     "解析变量定义失败，请检查流程配置: " + e.getMessage());
         }
+    }
+
+    /**
+     * 附加列定义：抽取完成后额外写入每一行的列（常用于把 begindate/enddate 这类时间变量落进数仓）
+     */
+    @Getter
+    public static class ExtraColumn {
+        private final String name;
+        /** VARIABLE：引用变量定义里的名字；CONSTANT：固定值（也可写 ${变量}） */
+        private final String valueType;
+        private final String value;
+        /** 建临时表用的列类型，走 FieldMetaResolver 白名单 */
+        private final String type;
+
+        public ExtraColumn(String name, String valueType, String value, String type) {
+            this.name = StrUtil.trimToEmpty(name);
+            this.valueType = StrUtil.blankToDefault(valueType, "VARIABLE");
+            this.value = StrUtil.trimToEmpty(value);
+            this.type = StrUtil.blankToDefault(type, "VARCHAR(255)");
+        }
+    }
+
+    /**
+     * 解析 filter_meta.extraColumns
+     */
+    public static List<ExtraColumn> parseExtraColumns(String filterMeta) {
+        if (StrUtil.isBlank(filterMeta)) {
+            return Collections.emptyList();
+        }
+        try {
+            JSONObject meta = JSONUtil.parseObj(filterMeta);
+            JSONArray array = meta.getJSONArray("extraColumns");
+            if (array == null || array.isEmpty()) {
+                return Collections.emptyList();
+            }
+            List<ExtraColumn> defs = new ArrayList<>();
+            for (Object item : array) {
+                if (!(item instanceof JSONObject obj)) {
+                    continue;
+                }
+                String name = StrUtil.trimToEmpty(obj.getStr("name"));
+                if (StrUtil.isBlank(name)) {
+                    continue;
+                }
+                // 列名会进建表与 INSERT 语句，只允许标识符
+                if (!COLUMN_PATTERN.matcher(name).matches()) {
+                    throw new BizException(ErrorCode.PARAM_ERROR,
+                            "附加列列名不合法（只允许字母/数字/下划线）: " + name);
+                }
+                defs.add(new ExtraColumn(name, obj.getStr("valueType"),
+                        obj.getStr("value"), obj.getStr("type")));
+            }
+            return defs;
+        } catch (BizException be) {
+            throw be;
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    "解析附加列配置失败，请检查流程配置: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 按当前轮次把附加列的取值算出来（变量走变量定义 / 循环参数，常量原样，两者都支持 ${} 替换）
+     */
+    public Map<String, String> resolveExtraColumns(EtlPipeline pipeline,
+                                                   StringBuilder logBuffer,
+                                                   Map<String, String> loopVars) {
+        List<ExtraColumn> defs = parseExtraColumns(pipeline.getFilterMeta());
+        if (defs.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        for (ExtraColumn def : defs) {
+            String raw = "VARIABLE".equalsIgnoreCase(def.getValueType())
+                    ? "${" + def.getValue() + "}"
+                    : def.getValue();
+            values.put(def.getName(), resolve(pipeline, raw, logBuffer, loopVars));
+        }
+        return values;
     }
 
     private Map<String, String> builtinVariables() {
