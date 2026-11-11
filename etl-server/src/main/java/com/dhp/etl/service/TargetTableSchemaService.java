@@ -112,7 +112,7 @@ public class TargetTableSchemaService {
     }
 
     /**
-     * 按映射结果变更目标表：表不存在则新建，存在则增删列并调整主键。
+     * 按映射结果变更目标表：表不存在则新建，存在则增删列、改列类型并调整主键。
      *
      * @return 实际执行的 SQL 列表
      */
@@ -121,17 +121,25 @@ public class TargetTableSchemaService {
         if (request.getAddColumns() == null) {
             request.setAddColumns(Collections.emptyList());
         }
+        if (request.getModifyColumns() == null) {
+            request.setModifyColumns(Collections.emptyList());
+        }
         if (request.getDropColumns() == null) {
             request.setDropColumns(Collections.emptyList());
         }
         if (request.getPrimaryKeys() == null) {
             request.setPrimaryKeys(Collections.emptyList());
         }
-        if (request.getAddColumns().isEmpty() && request.getDropColumns().isEmpty()
+        if (request.getAddColumns().isEmpty() && request.getModifyColumns().isEmpty()
+                && request.getDropColumns().isEmpty()
                 && request.getPrimaryKeys().isEmpty() && !request.isDropPrimaryKey()) {
             throw new BizException(ErrorCode.PARAM_ERROR, "没有需要变更的内容");
         }
         for (ColumnDef def : request.getAddColumns()) {
+            validateIdent(def.getName(), "列名");
+            def.setType(FieldMetaResolver.normalizeType(def.getType()));
+        }
+        for (ColumnDef def : request.getModifyColumns()) {
             validateIdent(def.getName(), "列名");
             def.setType(FieldMetaResolver.normalizeType(def.getType()));
         }
@@ -158,13 +166,26 @@ public class TargetTableSchemaService {
 
             // 主键为空表示"不改主键"，避免用户没勾选就被误删
             Set<String> currentKeys = currentPrimaryKeys(conn, tableName);
+            boolean dropKeys = request.isDropPrimaryKey() && !currentKeys.isEmpty();
             boolean changePrimaryKey = !request.getPrimaryKeys().isEmpty()
                     && !sameKeys(currentKeys, request.getPrimaryKeys());
 
             // 合成一条 ALTER：多条 DDL 中途失败会留下半成品，MySQL 8 的单条 DDL 是原子的
             List<String> clauses = new ArrayList<>();
-            if (changePrimaryKey && !currentKeys.isEmpty()) {
+            if (dropKeys || (changePrimaryKey && !currentKeys.isEmpty())) {
                 clauses.add("DROP PRIMARY KEY");
+            }
+            // 改类型放在加主键之前：TEXT 列不先转成 VARCHAR 无法做索引
+            Set<String> modified = new HashSet<>();
+            for (ColumnDef def : request.getModifyColumns()) {
+                modified.add(def.getName().toLowerCase());
+                StringBuilder clause = new StringBuilder("MODIFY COLUMN ")
+                        .append(quote(def.getName())).append(" ").append(def.getType())
+                        .append(Boolean.FALSE.equals(def.getNullable()) ? " NOT NULL" : " NULL");
+                if (StrUtil.isNotBlank(def.getComment())) {
+                    clause.append(" COMMENT '").append(def.getComment().replace("'", "''")).append("'");
+                }
+                clauses.add(clause.toString());
             }
             for (ColumnDef def : request.getAddColumns()) {
                 StringBuilder clause = new StringBuilder("ADD COLUMN ")
@@ -178,6 +199,17 @@ public class TargetTableSchemaService {
                 clauses.add("DROP COLUMN " + quote(column));
             }
             if (changePrimaryKey) {
+                // 主键列必须 NOT NULL；已有类型没改的列补一条 MODIFY，避免 ADD PRIMARY KEY 失败
+                Map<String, String> currentDefs = currentColumnDefs(conn, tableName);
+                for (String key : request.getPrimaryKeys()) {
+                    if (modified.contains(key.toLowerCase())) {
+                        continue;
+                    }
+                    String def = currentDefs.get(key.toLowerCase());
+                    if (def != null) {
+                        clauses.add("MODIFY COLUMN " + quote(key) + " " + def + " NOT NULL");
+                    }
+                }
                 clauses.add("ADD PRIMARY KEY ("
                         + request.getPrimaryKeys().stream().map(this::quote).collect(Collectors.joining(", "))
                         + ")");
@@ -262,6 +294,32 @@ public class TargetTableSchemaService {
         return desired.stream().allMatch(k -> lower.contains(k.toLowerCase()));
     }
 
+    /**
+     * 现有列的定义片段（类型 + 注释 + 自增），拼 MODIFY 时用来保留原有信息
+     */
+    private Map<String, String> currentColumnDefs(Connection conn, String tableName) throws Exception {
+        Map<String, String> defs = new LinkedHashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT, EXTRA FROM information_schema.COLUMNS "
+                        + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?")) {
+            ps.setString(1, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    StringBuilder def = new StringBuilder(rs.getString(2));
+                    if (StrUtil.containsIgnoreCase(rs.getString(4), "auto_increment")) {
+                        def.append(" AUTO_INCREMENT");
+                    }
+                    String comment = rs.getString(3);
+                    if (StrUtil.isNotBlank(comment)) {
+                        def.append(" COMMENT '").append(comment.replace("'", "''")).append("'");
+                    }
+                    defs.put(rs.getString(1).toLowerCase(), def.toString());
+                }
+            }
+        }
+        return defs;
+    }
+
     private boolean tableExists(Connection conn, String tableName) throws Exception {
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT COUNT(*) FROM information_schema.TABLES "
@@ -335,6 +393,8 @@ public class TargetTableSchemaService {
         private String name;
         private String type;
         private String comment;
+        /** 仅改类型时使用：是否允许 NULL，未指定按可空处理 */
+        private Boolean nullable;
     }
 
     @lombok.Data
@@ -342,6 +402,8 @@ public class TargetTableSchemaService {
         private Long datasourceId;
         private String table;
         private List<ColumnDef> addColumns;
+        /** 已有列改类型（MODIFY COLUMN） */
+        private List<ColumnDef> modifyColumns;
         private List<String> dropColumns;
         private List<String> primaryKeys;
         private boolean dropPrimaryKey;

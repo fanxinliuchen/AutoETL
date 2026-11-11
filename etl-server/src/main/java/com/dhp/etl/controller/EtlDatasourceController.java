@@ -53,7 +53,7 @@ public class EtlDatasourceController extends BaseCrudController<EtlDatasource> {
         return R.ok(targetTableSchemaService.describeTable(dto.getDatasourceId(), dto.getTable()));
     }
 
-    @Operation(summary = "按映射结果变更目标表结构（新建表 / 增删列 / 设置主键）")
+    @Operation(summary = "按映射结果变更目标表结构（新建表 / 增删列 / 改列类型 / 设置主键）")
     @PostMapping("/apply-schema")
     public R<Map<String, Object>> applySchema(
             @RequestBody TargetTableSchemaService.ApplyRequest request) {

@@ -208,6 +208,8 @@ export function applyTargetSchema(data: {
   datasourceId: number | string
   table: string
   addColumns: { name: string; type: string; comment?: string }[]
+  /** 已有列改类型（MODIFY COLUMN）；nullable=false 用于主键列 */
+  modifyColumns?: { name: string; type: string; comment?: string; nullable?: boolean }[]
   dropColumns: string[]
   primaryKeys: string[]
   dropPrimaryKey: boolean

@@ -1943,8 +1943,8 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
         v-else
         type="info"
         show-icon
-        :message="`拟执行：新增 ${schemaModal.addColumns.length} 列，删除 ${schemaModal.dropColumns.length} 列`"
-        description="删除列不可恢复，请确认下游没有依赖。变更会立即在目标库执行。"
+        :message="schemaPlanText"
+        description="类型修改只改列类型，NULL 约束按原样保留（主键列强制 NOT NULL）；删除列不可恢复。变更会立即在目标库执行。"
         style="margin-bottom: 12px"
       />
 
@@ -1961,11 +1961,35 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
       </div>
 
       <div class="schema-section">
+        <div class="schema-title">类型变更（目标表已有、与左侧类型不一致）</div>
+        <div v-if="!schemaModal.modifyColumns.length" class="schema-empty">无</div>
+        <div v-for="col in schemaModal.modifyColumns" :key="col.name" class="schema-row">
+          <a-checkbox v-model:checked="col.checked" :disabled="col.autoIncrement" />
+          <span class="schema-name">{{ col.name }}</span>
+          <span class="schema-type-old">{{ col.currentType }}</span>
+          <span class="schema-arrow">→</span>
+          <a-input
+            v-model:value="col.type"
+            size="small"
+            style="width: 180px"
+            :disabled="!col.checked || col.autoIncrement"
+          />
+        </div>
+        <div v-if="schemaModal.modifyColumns.length" class="fk-hint">
+          勾选后按右侧类型执行 MODIFY COLUMN；自增列不支持改类型。TEXT 列要先改成
+          VARCHAR(n) 才能设为主键。
+        </div>
+      </div>
+
+      <div class="schema-section">
         <div class="schema-title">删除字段（目标表有、左侧无）</div>
         <div v-if="!schemaModal.dropCandidates.length" class="schema-empty">无</div>
         <a-checkbox-group v-else v-model:value="schemaModal.dropColumns">
           <a-checkbox v-for="c in schemaModal.dropCandidates" :key="c" :value="c">{{ c }}</a-checkbox>
         </a-checkbox-group>
+        <div v-if="schemaModal.dropCandidates.length" class="fk-hint">
+          默认不勾选；只有勾选的列才会执行 DROP COLUMN（不可恢复，请确认下游没有依赖）
+        </div>
       </div>
 
       <div class="schema-section">
@@ -1975,8 +1999,15 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
         </a-checkbox-group>
         <div class="fk-hint">
           当前主键：{{ schemaModal.currentKeys.length ? schemaModal.currentKeys.join(', ') : '无' }}；
-          变更时若与所选不一致，会先删除旧主键再添加新主键
+          勾选后会先删除旧主键再添加新主键，主键列自动设为 NOT NULL
         </div>
+        <a-checkbox
+          v-if="schemaModal.currentKeys.length"
+          v-model:checked="schemaModal.dropPrimaryKey"
+          style="margin-top: 6px"
+        >
+          移除现有主键（上面不选新主键时即清空主键）
+        </a-checkbox>
       </div>
     </a-modal>
 
@@ -2678,22 +2709,51 @@ const onTargetTableChange = async () => {
 }
 
 // ===== 目标表结构变更确认弹窗 =====
+interface ModifyColumnDraft {
+  name: string
+  currentType: string
+  type: string
+  comment?: string
+  nullable: boolean
+  autoIncrement: boolean
+  checked: boolean
+}
+
 const schemaModal = ref({
   visible: false,
   submitting: false,
   tableExists: false,
   addColumns: [] as { name: string; type: string }[],
+  modifyColumns: [] as ModifyColumnDraft[],
   dropCandidates: [] as string[],
   dropColumns: [] as string[],
   currentKeys: [] as string[],
   keyCandidates: [] as string[],
-  primaryKeys: [] as string[]
+  primaryKeys: [] as string[],
+  dropPrimaryKey: false
 })
 
 const openSchemaModal = () => {
   const add = mappingRows.value
     .filter((r) => r.status === 'MISSING_IN_TARGET' && r.sourceName)
     .map((r) => ({ name: r.sourceName as string, type: r.sourceType || 'VARCHAR(255)' }))
+  // 目标表已有但类型与左侧不一致：默认全部勾选，按左侧类型改（自增列跳过，MODIFY 会丢自增属性）
+  const modify: ModifyColumnDraft[] = mappingRows.value
+    .filter((r) => r.status === 'TYPE_DIFF' && r.targetName)
+    .map((r) => {
+      const col = targetColumns.value.find(
+        (c) => c.name.toLowerCase() === (r.targetName as string).toLowerCase()
+      )
+      return {
+        name: r.targetName as string,
+        currentType: r.targetType || '',
+        type: r.sourceType || 'VARCHAR(255)',
+        comment: col?.comment,
+        nullable: col ? col.nullable : true,
+        autoIncrement: !!col?.autoIncrement,
+        checked: !col?.autoIncrement
+      }
+    })
   const drop = mappingRows.value
     .filter((r) => r.status === 'MISSING_IN_SOURCE' && r.targetName)
     .map((r) => r.targetName as string)
@@ -2714,21 +2774,56 @@ const openSchemaModal = () => {
     submitting: false,
     tableExists: targetColumns.value.length > 0,
     addColumns: add,
+    modifyColumns: modify,
     dropCandidates: drop,
-    dropColumns: [...drop],
+    // 默认不勾选：以「改类型 / 补列」为主的操作不该顺手把目标表多余列删掉
+    dropColumns: [],
     currentKeys,
     keyCandidates: candidates,
-    primaryKeys: defaultKeys
+    primaryKeys: defaultKeys,
+    dropPrimaryKey: false
   }
 }
+
+const sameKeySet = (current: string[], desired: string[]) => {
+  if (current.length !== desired.length) return false
+  const lower = current.map((k) => k.toLowerCase())
+  return desired.every((k) => lower.includes(k.toLowerCase()))
+}
+
+// 弹窗顶部的变更摘要
+const schemaPlanText = computed(() => {
+  const m = schemaModal.value
+  const parts: string[] = []
+  if (m.addColumns.length) parts.push(`新增 ${m.addColumns.length} 列`)
+  const mods = m.modifyColumns.filter((c) => c.checked && !c.autoIncrement).length
+  if (mods) parts.push(`修改类型 ${mods} 列`)
+  if (m.dropColumns.length) parts.push(`删除 ${m.dropColumns.length} 列`)
+  const pkChanged =
+    m.primaryKeys.length > 0 && !sameKeySet(m.currentKeys, m.primaryKeys)
+  if (m.dropPrimaryKey && !m.primaryKeys.length) parts.push('移除主键')
+  else if (pkChanged) parts.push(`主键改为 ${m.primaryKeys.join(' + ')}`)
+  return parts.length ? `拟执行：${parts.join('、')}` : '未检测到结构差异：可改类型、勾选主键或手动增删列'
+})
 
 const submitSchema = async () => {
   if (!formData.value.targetDsId || !formData.value.targetTable) {
     message.warning('请先选择目标数据源与目标表')
     return
   }
-  if (!schemaModal.value.addColumns.length && !schemaModal.value.dropColumns.length) {
-    message.warning('没有需要变更的字段')
+  const mods = schemaModal.value.modifyColumns.filter((c) => c.checked && !c.autoIncrement)
+  const pkChanged =
+    schemaModal.value.primaryKeys.length > 0 &&
+    !sameKeySet(schemaModal.value.currentKeys, schemaModal.value.primaryKeys)
+  const dropPk = schemaModal.value.dropPrimaryKey && schemaModal.value.currentKeys.length > 0
+  if (
+    !schemaModal.value.addColumns.length &&
+    !schemaModal.value.dropColumns.length &&
+    !mods.length &&
+    !pkChanged &&
+    !dropPk
+  ) {
+    message.warning('没有需要变更的字段：新增/删除列、类型变更、主键都没有改动')
     return
   }
   schemaModal.value.submitting = true
@@ -2737,9 +2832,20 @@ const submitSchema = async () => {
       datasourceId: formData.value.targetDsId,
       table: formData.value.targetTable.trim(),
       addColumns: schemaModal.value.addColumns,
+      modifyColumns: mods.map((c) => ({
+        name: c.name,
+        type: c.type,
+        comment: c.comment,
+        // 主键列必须 NOT NULL，其余保持原样
+        nullable: schemaModal.value.primaryKeys.some(
+          (k) => k.toLowerCase() === c.name.toLowerCase()
+        )
+          ? false
+          : c.nullable
+      })),
       dropColumns: schemaModal.value.dropColumns,
       primaryKeys: schemaModal.value.primaryKeys,
-      dropPrimaryKey: false
+      dropPrimaryKey: schemaModal.value.dropPrimaryKey
     })
     message.success(
       res.created ? `已新建目标表 ${res.table}` : `目标表已更新，执行 ${res.statements} 条语句`
@@ -4857,6 +4963,20 @@ defineExpose({ open })
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 类型变更行：当前类型 → 目标类型 */
+.schema-type-old {
+  width: 130px;
+  color: #8c8c8c;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+  text-align: right;
+}
+
+.schema-arrow {
+  color: #bfbfbf;
+  font-size: 12px;
 }
 
 .filt-row {
