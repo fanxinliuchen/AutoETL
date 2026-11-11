@@ -475,6 +475,10 @@ public class KingdeeMetadataClient {
             return "VARCHAR(255)";
         }
         String leaf = key.contains(".") ? key.substring(key.lastIndexOf('.') + 1) : key;
+        // 类型字段（FOWNERTYPEID 等）取的是实体标识字符串，如 BD_OwnerOrg，落 BIGINT 会写库失败
+        if (leaf.endsWith("TYPEID")) {
+            return "VARCHAR(255)";
+        }
         if (leaf.endsWith("ID") || leaf.equals("FID")) {
             return "BIGINT";
         }

@@ -23,7 +23,11 @@ import java.util.Date;
 @RequiredArgsConstructor
 public class AlertService {
 
+    /** 同一流程的告警最小间隔：防止重试/重复触发把群刷屏 */
+    private static final long MIN_INTERVAL_MS = 60_000L;
+
     private final EtlAlertConfigService alertConfigService;
+    private final java.util.concurrent.ConcurrentHashMap<Long, Long> lastSentAt = new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * 发送任务失败告警通知
@@ -33,19 +37,30 @@ public class AlertService {
             return;
         }
 
+        long now = System.currentTimeMillis();
+        Long last = lastSentAt.get(pipeline.getId());
+        if (last != null && now - last < MIN_INTERVAL_MS) {
+            log.warn("[告警] 流程 {} 距上次告警不足 {} 秒，本次跳过（避免刷屏）",
+                    pipeline.getPipelineCode(), MIN_INTERVAL_MS / 1000);
+            return;
+        }
+
         EtlAlertConfig config = alertConfigService.getById(pipeline.getAlertConfigId());
         if (config == null || config.getStatus() != 1 || StrUtil.isBlank(config.getWebhookUrl())) {
             return;
         }
 
         String title = "【ETL 流程执行异常告警】";
+        String retryLine = instance.getRetryCount() != null && instance.getRetryCount() > 0
+                ? "- **自动重试**: 已重试 " + instance.getRetryCount() + " 次仍失败\n"
+                : "";
         String content = String.format("""
                 ### 🚨 %s
                 - **流程名称**: %s (%s)
                 - **运行状态**: %s
                 - **触发方式**: %s
                 - **任务批次**: %s
-                - **触发时间**: %s
+                %s- **触发时间**: %s
                 - **错误摘要**: %s
                 """,
                 title,
@@ -53,6 +68,7 @@ public class AlertService {
                 instance.getTaskStatus() != null ? instance.getTaskStatus().getDesc() : "失败",
                 instance.getTriggerType() != null ? instance.getTriggerType().getDesc() : "未知",
                 instance.getId(),
+                retryLine,
                 DateUtil.formatDateTime(new Date()),
                 StrUtil.sub(ex.getMessage(), 0, 500)
         );
@@ -67,6 +83,7 @@ public class AlertService {
                 case FEISHU -> sendFeishuAlert(config.getWebhookUrl(), title, content);
                 default -> sendGenericAlert(config.getWebhookUrl(), content);
             }
+            lastSentAt.put(pipeline.getId(), now);
         } catch (Exception e) {
             log.error("发送告警通知异常: {}", e.getMessage());
         }

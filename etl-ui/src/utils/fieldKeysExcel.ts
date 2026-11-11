@@ -152,6 +152,8 @@ export function inferFieldType(fieldKey: string): string {
   const key = (fieldKey || '').toUpperCase()
   if (!key) return 'VARCHAR(255)'
   const leaf = key.includes('.') ? key.slice(key.lastIndexOf('.') + 1) : key
+  // 类型字段（FOWNERTYPEID 等）取的是实体标识字符串，如 BD_OwnerOrg，落 BIGINT 会写库失败
+  if (leaf.endsWith('TYPEID')) return 'VARCHAR(255)'
   if (leaf.endsWith('ID') || leaf === 'FID') return 'BIGINT'
   // 日期统一 DATETIME：金蝶返回 2026-11-09T10:30:00，落 DATE 列会静默丢掉时分秒
   if (leaf.includes('DATE') || leaf.includes('TIME')) return 'DATETIME'

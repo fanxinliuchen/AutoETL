@@ -20,7 +20,7 @@ public class EtlTaskInstanceServiceImpl extends BaseCrudServiceImpl<EtlTaskInsta
     }
 
     @Override
-    public EtlTaskInstance createRunningInstance(EtlPipeline pipeline, TriggerTypeEnum triggerType) {
+    public EtlTaskInstance createRunningInstance(EtlPipeline pipeline, TriggerTypeEnum triggerType, int retryCount) {
         EtlTaskInstance instance = new EtlTaskInstance();
         instance.setPipelineId(pipeline.getId());
         instance.setPipelineCode(pipeline.getPipelineCode());
@@ -30,7 +30,8 @@ public class EtlTaskInstanceServiceImpl extends BaseCrudServiceImpl<EtlTaskInsta
         instance.setStartTime(new Date());
         instance.setReadCount(0L);
         instance.setWriteCount(0L);
-        instance.setRetryCount(0);
+        // 重试次数必须落库：否则每次重试都从 0 开始，失败判定永远成立会无限重试
+        instance.setRetryCount(Math.max(retryCount, 0));
         instance.setLogDetail("[任务启动] 批次正在初始化...\n");
 
         this.save(instance);

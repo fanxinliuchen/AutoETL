@@ -192,6 +192,9 @@ class KingdeeMetadataClientTest {
     void inferByKey() {
         assertEquals("BIGINT", KingdeeMetadataClient.inferTypeByKey("FID"));
         assertEquals("BIGINT", KingdeeMetadataClient.inferTypeByKey("FSupplierId"));
+        // 类型字段取的是实体标识字符串（BD_OwnerOrg），不能按 *ID 推成 BIGINT
+        assertEquals("VARCHAR(255)", KingdeeMetadataClient.inferTypeByKey("FOWNERTYPEID"));
+        assertEquals("VARCHAR(255)", KingdeeMetadataClient.inferTypeByKey("FCustTypeId"));
         assertEquals("DATETIME", KingdeeMetadataClient.inferTypeByKey("FDate"));
         assertEquals("DATETIME", KingdeeMetadataClient.inferTypeByKey("FApproveTime"));
         assertEquals("DECIMAL(18,4)", KingdeeMetadataClient.inferTypeByKey("FBillAllAmount"));

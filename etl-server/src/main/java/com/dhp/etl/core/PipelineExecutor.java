@@ -96,6 +96,15 @@ public class PipelineExecutor {
      * 串行执行以复用同一个 staging 表；某轮失败即中止后续轮次，避免参数有问题时批量写入半成品数据。
      */
     public void execute(Long pipelineId, TriggerTypeEnum triggerType) {
+        execute(pipelineId, triggerType, 0);
+    }
+
+    /**
+     * @param retryCount 本次是第几次自动重试（0 = 首次触发）。
+     *                   必须沿重试链一路传递：新实例如果总从 0 开始，
+     *                   “还有重试机会”永远成立，失败会无限重试并反复推送告警。
+     */
+    void execute(Long pipelineId, TriggerTypeEnum triggerType, int retryCount) {
         EtlPipeline pipeline = pipelineService.getById(pipelineId);
         if (pipeline == null) {
             log.warn("流程未找到: id={}", pipelineId);
@@ -120,7 +129,7 @@ public class PipelineExecutor {
             return;
         }
 
-        EtlTaskInstance instance = instanceService.createRunningInstance(pipeline, triggerType);
+        EtlTaskInstance instance = instanceService.createRunningInstance(pipeline, triggerType, retryCount);
         StringBuilder logBuffer = new StringBuilder();
         boolean looped = false;
         int totalRounds = 1;
@@ -214,16 +223,27 @@ public class PipelineExecutor {
             logBuffer.append(String.format("[%s] ===== 流程发生异常 =====\n%s\n",
                     LocalDateTime.now(), ExceptionUtil.stacktraceToString(ex, 5000)));
 
-            // 触发告警通知
-            alertService.sendAlert(pipeline, instance, ex);
-
-            // 失败重试逻辑
-            if (instance.getRetryCount() < (pipeline.getMaxRetryCount() != null ? pipeline.getMaxRetryCount() : 0)) {
-                int nextRetry = instance.getRetryCount() + 1;
+            // 失败重试：次数沿调用链传递，用尽后不再重试；告警只在“确实不会再重试”时发一次，
+            // 否则一次故障重试几轮就推几条，群里会被刷屏
+            int configured = pipeline.getMaxRetryCount() == null ? 0 : pipeline.getMaxRetryCount();
+            int maxRetry = Math.min(Math.max(configured, 0), 10);
+            if (configured > 10) {
+                log.warn("[ETL] 流程 {} 配置的自动重试次数 {} 超过上限，按 10 次执行",
+                        pipeline.getPipelineCode(), configured);
+            }
+            int currentRetry = instance.getRetryCount() == null ? retryCount : instance.getRetryCount();
+            int nextRetry = currentRetry + 1;
+            if (currentRetry < maxRetry) {
                 instance.setRetryCount(nextRetry);
-                logBuffer.append(String.format("[重试] 准备执行第 %d 次自动重试...\n", nextRetry));
+                logBuffer.append(String.format("[重试] 第 %d/%d 次自动重试将在 30 秒后开始（本次失败暂不告警）\n",
+                        nextRetry, maxRetry));
                 CompletableFuture.delayedExecutor(30, TimeUnit.SECONDS)
-                        .execute(() -> this.execute(pipelineId, triggerType));
+                        .execute(() -> this.execute(pipelineId, triggerType, nextRetry));
+            } else {
+                if (maxRetry > 0) {
+                    logBuffer.append(String.format("[重试] 已用尽自动重试（%d 次），本次失败将发送告警\n", maxRetry));
+                }
+                alertService.sendAlert(pipeline, instance, ex);
             }
         } finally {
             runningTasks.remove(pipelineId);
