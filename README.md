@@ -1,7 +1,7 @@
 # DHP 轻量级 Web-ETL 数据集成与调度系统
 
 > **定位**：基于 Web 网页形式的轻量级 ELT（Extract-Load-Transform）数据集成与定时调度平台。  
-> **核心特性**：支持双输入源（MySQL / WebAPI）抽取、Staging 临时表中转、原生 SQL 脚本清洗转换、写入 MySQL 数仓、280px 树形多目录流程管理、动态 Cron 定时调度与服务重启恢复、多通道（企业微信/钉钉/飞书/邮件）异常告警。  
+> **核心特性**：支持双输入源（MySQL / WebAPI）抽取、**金蝶单据与报表取数自动识别**、Staging 临时表中转、原生 SQL 脚本清洗转换、写入 MySQL 数仓、280px 树形多目录流程管理、动态 Cron 定时调度与服务重启恢复、多通道（企业微信/钉钉/飞书/邮件）异常告警。  
 > **团队规范**：严格遵循 `dhp-product-specification/rules`（后端规范 `03`、前端规范 `04`、枚举管理 `06`、接口契约 `07`、UI/UE 规范 `16`）。
 
 ---
@@ -92,6 +92,8 @@ E:\3-code\ERPwebAPI/
 │       │           ├── guard/SqlSafetyGuard     # JSqlParser AST 白名单守卫
 │       │           ├── extractor/MySqlExtractor # 流式游标抽取组件
 │       │           ├── extractor/WebApiExtractor# WebAPI + JsonPath + SSRF 校验组件
+│       │           ├── extractor/KingdeeMetadataClient # 金蝶 QueryBusinessInfo 字段元数据与表单类型识别
+│       │           ├── extractor/KingdeeReportClient   # 金蝶报表取数（试取一行推断字段）
 │       │           ├── loader/MySqlDwLoader     # 临时表管理与批量写入组件
 │       │           ├── transformer/SqlTransform # 变量替换与多段 SQL 执行器
 │       │           ├── schedule/DynamicCronScheduler # 动态 Cron 调度与就绪自动恢复
@@ -105,16 +107,18 @@ E:\3-code\ERPwebAPI/
 │   ├── index.html / vite.config.ts / tsconfig.json / package.json
 │   └── src/
 │       ├── types/index.ts                       # 统一 TS 类型声明 (Snowflake ID 均采用 string)
-│       ├── api/                                 # 接口层 (request.ts 解包 R<T> 信封)
+│       ├── api/                                 # 接口层 (request.ts 解包 R<T>、统一错误提示、silent 开关)
+│       ├── utils/fieldKeysExcel.ts              # 字段清单 Excel 导入导出、类型推断
 │       ├── components/
 │       │   ├── FolderTree.vue                   # 280px 左侧目录树组件 (增删改重命名与搜索)
 │       │   ├── SqlEditor.vue                    # 代码高亮编辑器 (动态变量一键插入、AST安全预检)
-│       │   ├── PipelineDrawer.vue               # 流程配置大抽屉 (输入源/SQL处理/目标库/Cron)
+│       │   ├── PipelineEditor.vue               # 流程配置设计器 (5 个子 Tab：基础/抽取/转换/目标/调度)
 │       │   ├── InstanceLogDrawer.vue            # 批次日志追踪抽屉 (历史批次/全量控制台日志)
 │       │   ├── DatasourceModal.vue              # 数据源连接弹窗 (带在线连通性测试)
 │       │   └── AlertModal.vue                   # 机器人通道管理弹窗
 │       ├── App.vue                              # 规范 16-07 “左树右列表” 工作台主布局
 │       └── main.ts                              # 前端主入口
+├── start-all.bat / stop-all.bat / status.bat    # 一键启停与状态检查（见「四、快速启动」）
 └── README.md
 ```
 
@@ -191,7 +195,7 @@ cd E:\3-code\ERPwebAPI\etl-server
 mvn spring-boot:run
 ```
 * **服务端口**：`8388`（如需临时换端口，可追加 `-Dspring-boot.run.arguments=--server.port=xxxx` 覆盖）
-* **Swagger 在线 API 文档**：[http://localhost:8388/swagger-ui.html](http://localhost:8388/swagger-ui.html)
+* **Swagger 在线 API 文档**：[http://localhost:8388/swagger-ui/index.html](http://localhost:8388/swagger-ui/index.html)
 * **默认本地连接**：`application-local.yml`（可通过系统环境变量 `DB_PASSWORD`、`DB_HOST` 等覆盖）
 
 ### 4. 启动前端控制台 (etl-ui)
@@ -221,17 +225,29 @@ pnpm dev
   * 支持注入鉴权 Header（如 `{"Authorization": "Bearer token"}`）及 JSON 请求体模板。
   * 采用 JsonPath 灵活提取数组节点（例如 `$.data.records` 或 `$.result.list`）。
   * 内置 **SSRF 安全防护**，拦截内网私有 IP 探测。
-  * **支持金蝶两种取数报文**（前端「取数方式」切换，后端按报文自动适配）：
+  * **金蝶取数方式（三选一：自动识别 / 标准查询 / 报表方案）**：
 
     | | 标准查询 | 报表方案查询 |
     |---|---|---|
-    | 报文外形 | `{"data":{"FormId":…,"FilterString":…}}` | `{"parameters":[{"FORMID":…,"FSCHEMEID":…}]}` |
-    | 过滤条件 | `FilterString` 字符串（可用变量 `${name}`） | `QuicklyCondition` 数组（`FieldName` / `FieldValue`） |
-    | 方案 ID | 无 | `FSCHEMEID` |
-    | 典型接口 | `ExecuteBillQuery` / `BillQuery` | 带过滤方案的报表接口（如库存汇总表） |
+    | 报文外形 | `{"data":{"FormId":…,"FilterString":…}}` | `{"parameters":[{"FORMID":…,"FSCHEMEID":…,"QuicklyCondition":[…]}]}` |
+    | 适用表单 | 单据类（BOS 表单有元数据） | 报表 / 账表类（无单据元数据） |
+    | 过滤条件 | `FilterString` 字符串，四列构建器 | `QuicklyCondition` 等值数组（字段 / 值 两列） |
+    | 方案 ID | 无 | `FSCHEMEID`（必填，且不能是默认方案） |
+    | 典型接口 | `DynamicFormService.ExecuteBillQuery` | `StockReportQueryService.GetReportData` |
+    | 数据路径 | `$.*`（返回裸二维数组） | `$.data`（返回 `{success,data,TotalCount}`；切到报表方案时自动设置，也可在「结果提取 JsonPath」里改） |
 
-    后端自动识别 `parameters` 结构：分页字段写到 `parameters[0].StartRow` / `Limit`，并从同一位置读取 `FieldKeys`；
-    若显式配置过 `offsetPath` / `limitPath`，以显式配置为准。报表模式的过滤条件同样支持 `${变量}`，变量仍由「变量定义」里的 SQL 计算。
+    * **自动识别**：FormId 改完后防抖调用 `POST /etl/pipeline/webapi/detect-form`，用 `QueryBusinessInfo`
+      能否返回字段定义来判定——有字段是单据（标准查询），无字段是报表（报表方案），同时把字段数 /
+      `IsNeedLinkTable`、`LinkEntitys` 等判定依据显示在「取数方式」下方，识别为报表时自动切报文模板与数据路径。
+    * **手动优先**：手动点选标准查询 / 报表方案后，选择写入 `filter_meta.bodyMode`，重开流程和后续自动识别都不会覆盖。
+    * **报表方案的两个坑**（代码里都已兜住）：
+      * 接口地址的装配名分隔符是**英文逗号**：`…GetReportData,Kingdee.K3.SCM.WebApi.ServicesStub.common.kdsvc`。
+        误写成点号金蝶直接返回 `… no found`；界面会提示并支持一键修正，保存时也会自动纠正。
+      * 金蝶可能无视 `FieldKeys`、返回过滤方案的全部列（实测 868 列）。抽取结果会按配置的字段清单裁剪后再建临时表，
+        避免 800+ 列撞 InnoDB 行大小上限（`Row size too large`）。
+    * **从报表试取字段**：报表没有列定义接口，`POST /etl/pipeline/webapi/report-fields` 用 `GetReportData` 取 1 行，
+      按返回行的 key 反推字段标识与类型（报表返回中没有中文名，留空待补）。方案查不出数据时会明确提示
+      「没有返回数据，无法推断」，而不是报一个看不懂的错。
   * **循环取数**（一次运行跑多轮，第 2 步配置）：
     * 填写一段返回多行的 SQL，**列名即变量名**，每行触发一轮完整流程。
     * 变量优先级：循环变量 > 变量定义 > 内置变量；抽取条件、请求体、MySQL 源 SQL 里的 `${name}` 都会按当轮取值替换。
@@ -247,7 +263,10 @@ pnpm dev
     * 「试算」按钮先看轮数与每轮参数，避免配错跑出几百轮；`最多循环次数` 超限会直接报错而非静默截断。
 
   * **金蝶业务错误双层拦截**：除了检查响应根节点的 `Result.ResponseStatus.IsSuccess`，还会逐格检查数据单元格——`ExecuteBillQuery` 出错时返回的是 `[[{"Result":{"ResponseStatus":{…}}}]]`，错误对象藏在数据里，不拦就会被当成一条正常记录写进临时表。
-  * **过滤条件支持多字段多条件**：
+  * **过滤条件支持多字段多条件（仅标准查询）**：
+    * 报表方案不走 `FilterString`：它的条件是 `QuicklyCondition` 等值数组，界面上只有「字段 / 值」两列，
+      没有操作符与值类型；需要 `>`、`<` 这类比较条件时得用金蝶的 `MoreCondition`（当前界面未提供）。
+      值同样支持 `${变量}`，由「变量定义」里的 SQL 在运行时计算。
     * 结构化模式逐行配置「连接符(AND/OR) · 字段 · 操作符 · 值类型 · 值」，操作符含 `= <> > >= < <= LIKE NOT LIKE IN NOT IN IS NULL IS NOT NULL`。
     * 值类型支持文本、数字、**变量**、原始表达式；「变量」会从已定义的变量里下拉选择。
     * **变量定义（SQL 取值）**：面板上方可定义变量，每个变量写一段 SQL 表达式，**执行时在目标数据源上实时计算**，再替换请求体里的 `${变量名}`。不用在界面上算日期，定时任务每天自然滚动。
@@ -282,13 +301,18 @@ pnpm dev
     | 结束条件 | 本页条数 < 该值即停止 | 0（= 每页条数） |
     | 请求间隔 | 两次请求之间的休眠毫秒，用于限速 | 0 |
 
-    每轮把 `起始偏移 + 页码 × 增长间隔` 写回请求体 `data.StartRow`，每页条数写回 `data.Limit`；直到某页条数小于结束阈值或达到取数上限。运行日志逐页记录偏移量与本页/累计条数，触达上限时提示「可能仍有剩余数据」。
+    每轮把 `起始偏移 + 页码 × 增长间隔` 写回请求体的偏移字段：标准查询写 `data.StartRow`、报表方案写 `parameters[0].StartRow`，
+    每页条数同理；分页路径按报文体结构自动切换（历史配置里残留的旧路径会被纠正，避免凭空造出一个 `data` 节点让金蝶忽略 `FieldKeys`）。
+    直到某页条数小于结束阈值或达到取数上限。运行日志逐页记录偏移量与本页/累计条数，触达上限时提示「可能仍有剩余数据」。
   * **抽取字段清单支持 Excel 批量维护**（金蝶单据动辄几十上百个字段，手工拼逗号串易错）：可下载模板批量填写后一键导入，也可把当前清单导出为 Excel 备份或批量修改。表格支持增删行、上下移动、逐行启停。
     * 导入按表头名称识别列，列顺序可随意调整；字段名含空格、逗号、中文会直接报错并定位到行号，重复字段自动去重。
     * **行序即 FieldKeys 序，也是临时表列序**：抽取结果按 FieldKeys 下标对齐金蝶返回的二维数组，调整顺序会改变列序。
+    * 接口多返回的列会被裁掉：即使金蝶无视 `FieldKeys` 返回了方案全部列（报表常见），落库字段仍以清单为准。
     * 「启用=否」的行不进入 FieldKeys，但保留在清单中，可随时恢复。
     * **金蝶登录凭证加密存储**：登录地址、单据查询接口地址、账套、用户名与密码可一键保存到 `t_etl_kingdee_credential`（密码 AES 加密，**接口永不回显**）。之后点「载入默认凭证」即可自动填充登录信息与单据查询 URL，密码框回填 8 个星号占位（提交时自动转空，由后端取已保存密码）。仅当账套与用户名同时匹配才兜底，避免把 A 账号密码用到 B 账号上。
   * **从金蝶拉字段**：登录 K3Cloud 后调用 `DynamicFormService.QueryBusinessInfo`，自动带出表单全部字段的标识、中文名与数据类型，勾选后「追加」或「覆盖」到清单。首次拉取只预勾选清单里还没有的字段，避免覆盖手工调整。
+    * 仅对**单据类**表单有效。报表 / 账表没有 `QueryBusinessInfo` 元数据，弹窗会直接说明原因（不再发一次必然失败的请求），
+      此时改用「从报表试取字段」或 Excel 导入。
     * **推断类型**：按字段名规则推断（`FID`/`*Id`→`BIGINT`、`*Date`→`DATE`、`*Time`→`DATETIME`、`*Amount`/`*Qty`/`*Price`→`DECIMAL(18,4)`…），只填充仍为 `TEXT` 的行。
     * 「中文名」「类型」随流程保存在 `t_etl_pipeline.field_meta`（JSON）。**类型会用于创建 Staging 临时表列**（如 `DECIMAL(18,4)`、`DATETIME`），未指定的列仍为 `TEXT`；类型白名单之外的取值一律降级为 `TEXT`。改动类型后，下次运行会自动比对并重建临时表。
 
@@ -368,6 +392,18 @@ pnpm dev
   * 钉钉群机器人 Webhook
   * 飞书群自定义机器人 Webhook
   * 邮件通知列表
+
+### 6. 保存、草稿与运行前置条件
+
+* **草稿判定**：只看「目标数据源 + 目标表」是否配好。转换 SQL **允许为空**（留空即自动生成直通入库脚本），
+  因此不写 SQL 的流程在配好目标表后就是正式状态，列表不再显示「草稿 / 配置中」，运行按钮可用。
+  后端 `PipelineExecutor` 用同一口径校验，前后端不会一个说能跑、一个拒绝执行。
+* **保存以请求体原文为准**：在「请求体 Body」里手工微调过报文后，保存不会再被上方的向导字段覆盖。
+  报文结构识别不出来时（自定义报文 / JSON 语法不完整），界面会提示「按原文保存」，并把内容原样落库，而不是悄悄换成模板。
+* **服务地址自动纠错**：金蝶服务地址的装配名分隔符必须是英文逗号，写成点号会在保存时被自动纠正，
+  输入框也会给出提示与「一键修正」，避免存下一个运行必然失败的地址。
+* **保存与运行的一致性**：`filter_meta` 由统一入口序列化（过滤模式 / 取数方式 / 变量 / 循环 / 条件），
+  切换文本或表格模式不会再把变量定义、循环配置写丢。
 
 ---
 
