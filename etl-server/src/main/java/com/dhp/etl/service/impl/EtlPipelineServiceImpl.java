@@ -16,6 +16,7 @@ import com.dhp.etl.enums.TriggerTypeEnum;
 import com.dhp.etl.mapper.EtlPipelineMapper;
 import com.dhp.etl.service.EtlPipelineService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.BeanUtils;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
 
@@ -30,6 +31,11 @@ public class EtlPipelineServiceImpl extends BaseCrudServiceImpl<EtlPipelineMappe
     private final SqlSafetyGuard sqlSafetyGuard;
     private final DynamicCronScheduler scheduler;
     private final PipelineExecutor pipelineExecutor;
+
+    /** 流程名称列宽（VARCHAR(128)） */
+    private static final int NAME_MAX_LENGTH = 128;
+    /** 副本名称后缀 */
+    private static final String COPY_SUFFIX = "（副本）";
 
     @Override
     protected Class<EtlPipeline> getClaas() {
@@ -134,6 +140,58 @@ public class EtlPipelineServiceImpl extends BaseCrudServiceImpl<EtlPipelineMappe
     @Override
     public boolean cancelRunning(Long id) {
         return pipelineExecutor.cancelRunning(id);
+    }
+
+    @Override
+    public EtlPipeline copyPipeline(Long id) {
+        EtlPipeline source = this.getById(id);
+        if (source == null) {
+            throw new BizException(ErrorCode.ETL_PIPELINE_NOT_FOUND);
+        }
+
+        EtlPipeline copy = new EtlPipeline();
+        BeanUtils.copyProperties(source, copy);
+
+        // 主键与审计字段必须重置：沿用旧值会覆盖原记录或带着旧时间入库
+        copy.setId(null);
+        copy.setCreateUserId(null);
+        copy.setCreateUserName(null);
+        copy.setCreateTime(null);
+        copy.setUpdateUserId(null);
+        copy.setUpdateUserName(null);
+        copy.setUpdateTime(null);
+        copy.setObjectStatusCd(null);
+        copy.setObjectVersion(null);
+        copy.setTenantId(null);
+
+        copy.setPipelineCode(generatePipelineCode());
+        copy.setPipelineName(nextCopyName(source.getPipelineName()));
+        // 副本默认停用：改完 Cron / 目标表再手动开启，避免与原流程同一时刻双跑
+        copy.setScheduleStatus(0);
+        copy.setLastRunStatus(null);
+        copy.setLastRunTime(null);
+
+        // 不走 savePipeline 的 SQL / Cron 校验：原流程已在跑，复制不应被历史写法挡住
+        this.save(copy);
+        return copy;
+    }
+
+    /**
+     * 副本名称：原名 + （副本），重名时递增序号；超过列宽（128）先截断原名
+     */
+    private String nextCopyName(String sourceName) {
+        String base = StrUtil.blankToDefault(sourceName, "未命名流程");
+        int keep = NAME_MAX_LENGTH - COPY_SUFFIX.length() - 3;
+        if (base.length() > keep) {
+            base = base.substring(0, keep);
+        }
+        String name = base + COPY_SUFFIX;
+        int index = 2;
+        while (this.count(new LambdaQueryWrapper<EtlPipeline>()
+                .eq(EtlPipeline::getPipelineName, name)) > 0) {
+            name = base + "（副本" + index++ + "）";
+        }
+        return name;
     }
 
     private void checkCodeUnique(String code, Long excludeId) {

@@ -83,6 +83,12 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
         return R.ok();
     }
 
+    @Operation(summary = "整体复制流程（配置全量复制，调度默认停用）")
+    @PostMapping("/{id}/copy")
+    public R<EtlPipeline> copy(@PathVariable Long id) {
+        return R.ok(pipelineService.copyPipeline(id));
+    }
+
     @Operation(summary = "启停定时调度")
     @PutMapping("/{id}/schedule/toggle")
     public R<Void> toggleSchedule(@PathVariable Long id, @RequestParam Boolean enabled) {

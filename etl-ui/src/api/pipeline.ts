@@ -25,6 +25,11 @@ export function getPipelineDetail(id: string): Promise<EtlPipeline> {
   return request.get(`/etl/pipeline/${id}/detail`)
 }
 
+/** 整体复制流程：配置全量复制，返回副本（编码/名称由后端生成，调度默认停用） */
+export function copyPipeline(id: string): Promise<EtlPipeline> {
+  return request.post(`/etl/pipeline/${id}/copy`)
+}
+
 export function runPipeline(id: string): Promise<void> {
   return request.post(`/etl/pipeline/${id}/run`)
 }

@@ -1185,9 +1185,8 @@
                                 :max="1000000"
                                 :disabled="!pagination.enabled"
                                 style="width: 100%"
-                                @change="syncPagination"
+                                @change="onPaginationNumberChange('step')"
                               />
-                              <div class="fk-hint">0 表示与每页条数相同</div>
                             </a-form-item>
                           </a-col>
                           <a-col :span="8">
@@ -1198,9 +1197,8 @@
                                 :max="10000"
                                 :disabled="!pagination.enabled"
                                 style="width: 100%"
-                                @change="syncPagination"
+                                @change="onPaginationNumberChange('endWhenLessThan')"
                               />
-                              <div class="fk-hint">0 表示与每页条数相同</div>
                             </a-form-item>
                           </a-col>
                         </a-row>
@@ -2363,21 +2361,47 @@ const quickConditionPreview = computed(() =>
 )
 
 // ===== 高级配置：分页取数（对应 t_etl_pipeline.api_pagination） =====
+// 增长间隔 / 结束条件默认与「每页条数」保持一致，用户改过就不再自动跟随
 const defaultPagination = () => ({
   enabled: false,
   offsetPath: 'data.StartRow',
   limitPath: 'data.Limit',
   start: 0,
-  step: 0,
+  step: 2000,
   pageSize: 2000,
   maxPages: 200,
-  endWhenLessThan: 0,
+  endWhenLessThan: 2000,
   intervalMs: 0
 })
 
 const pagination = ref(defaultPagination())
+/** 用户是否手工改过这两项（改过就不再被每页条数覆盖） */
+const paginationCustom = ref({ step: false, endWhenLessThan: false })
 // 默认展开，避免被当成一条不起眼的折叠项
 const advancedActiveKeys = ref<string[]>(['pagination'])
+
+/**
+ * 增长间隔 / 结束条件必须大于 0：
+ * 旧版本用 0 表示「与每页条数相同」，这类老配置在回显时已直接换算成每页条数，
+ * 所以表单里再填 0 就是无效值，提示并还原为每页条数。
+ */
+const onPaginationNumberChange = (key: 'step' | 'endWhenLessThan') => {
+  const value = Number(pagination.value[key])
+  if (!value || value <= 0) {
+    message.warning('请填写大于 0 的数')
+    pagination.value[key] = pagination.value.pageSize
+    paginationCustom.value[key] = false
+  } else {
+    paginationCustom.value[key] = value !== pagination.value.pageSize
+  }
+  syncPagination()
+}
+
+/** 每页条数变化时，未被用户改过的两项跟着走 */
+const syncPaginationDefaults = (pageSize: number) => {
+  if (!paginationCustom.value.step) pagination.value.step = pageSize
+  if (!paginationCustom.value.endWhenLessThan) pagination.value.endWhenLessThan = pageSize
+}
 
 // api_pagination 在库里是 MySQL JSON 列，空字符串会被判为非法 JSON，关闭时写 {} 而不是 ''
 const syncPagination = () => {
@@ -2388,6 +2412,7 @@ const syncPagination = () => {
 
 const loadPagination = () => {
   pagination.value = defaultPagination()
+  paginationCustom.value = { step: false, endWhenLessThan: false }
   if (formData.value.apiPagination) {
     try {
       const parsed = JSON.parse(formData.value.apiPagination)
@@ -2398,13 +2423,22 @@ const loadPagination = () => {
     }
   }
   // 每页条数以「单次抓取上限」为准，避免两处配置不一致
-  pagination.value.pageSize = kingdeeQuery.value.limit || pagination.value.pageSize || 2000
+  const pageSize = kingdeeQuery.value.limit || pagination.value.pageSize || 2000
+  pagination.value.pageSize = pageSize
+  // 老配置的 0（= 与每页条数相同）直接换算成具体值；与每页条数相同的也视为未自定义
+  paginationCustom.value = {
+    step: pagination.value.step > 0 && pagination.value.step !== pageSize,
+    endWhenLessThan:
+      pagination.value.endWhenLessThan > 0 && pagination.value.endWhenLessThan !== pageSize
+  }
+  syncPaginationDefaults(pageSize)
 }
 
 // 开启分页时先把每页条数对齐到单次抓取上限
 const onPaginationToggle = () => {
   if (pagination.value.enabled) {
     pagination.value.pageSize = kingdeeQuery.value.limit || 2000
+    syncPaginationDefaults(pagination.value.pageSize)
   }
   syncPagination()
 }
@@ -3520,6 +3554,7 @@ const syncKingdeeQueryToBody = () => {
   const limit = kingdeeQuery.value.limit || 2000
   if (pagination.value.pageSize !== limit) {
     pagination.value.pageSize = limit
+    syncPaginationDefaults(limit)
     if (pagination.value.enabled) {
       syncPagination()
     }
@@ -4273,6 +4308,7 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     }
     kingdeeQuery.value = defaultKingdeeQuery()
     pagination.value = defaultPagination()
+    paginationCustom.value = { step: false, endWhenLessThan: false }
     advancedActiveKeys.value = ['pagination']
     // 新建流程回到默认口径，避免沿用上一条流程的取数方式
     bodyMode.value = 'STANDARD'
@@ -4302,6 +4338,7 @@ const handleReset = () => {
     formData.value = initialFormData()
     kingdeeQuery.value = defaultKingdeeQuery()
     pagination.value = defaultPagination()
+    paginationCustom.value = { step: false, endWhenLessThan: false }
     advancedActiveKeys.value = ['pagination']
     bodyMode.value = 'STANDARD'
     bodyModeSel.value = 'AUTO'

@@ -10,7 +10,7 @@
     <div class="folder-search">
       <a-input-search
         v-model:value="searchValue"
-        placeholder="搜索目录..."
+        placeholder="搜索目录 / 流程..."
         size="small"
         allow-clear
       />
@@ -28,10 +28,19 @@
         :default-expand-all="true"
         @select="onSelect"
       >
-        <template #title="{ key, title }">
-          <div class="tree-node-title">
-            <span class="node-text">{{ title }}</span>
-            <span class="node-actions" @click.stop>
+        <template #title="{ key }">
+          <div
+            class="tree-node-title"
+            :class="{ 'is-pipeline': nodeOf(key).nodeType === 'PIPELINE' }"
+          >
+            <span class="node-text" :title="nodeOf(key).pipelineCode || nodeOf(key).title">
+              <node-index-outlined
+                v-if="nodeOf(key).nodeType === 'PIPELINE'"
+                class="node-type-icon"
+              />
+              <span class="node-label">{{ nodeOf(key).title }}</span>
+            </span>
+            <span v-if="canManage(key)" class="node-actions" @click.stop>
               <a-dropdown :trigger="['click']">
                 <more-outlined class="action-btn" />
                 <template #overlay>
@@ -39,7 +48,7 @@
                     <a-menu-item @click="openAddModal(key)">
                       <plus-outlined /> 新增子目录
                     </a-menu-item>
-                    <a-menu-item @click="openEditModal(key, title)">
+                    <a-menu-item @click="openEditModal(key, nodeOf(key).title)">
                       <edit-outlined /> 重命名
                     </a-menu-item>
                     <a-menu-item danger @click="handleDelete(key)">
@@ -82,13 +91,15 @@ import {
   PlusOutlined,
   EditOutlined,
   DeleteOutlined,
-  MoreOutlined
+  MoreOutlined,
+  NodeIndexOutlined
 } from '@ant-design/icons-vue'
 import { Empty, message, Modal } from 'ant-design-vue'
 import { getFolderTree, saveFolder, updateFolder, deleteFolder } from '../api/folder'
 
 const emit = defineEmits<{
   (e: 'select', folderId: string): void
+  (e: 'select-pipeline', pipelineId: string): void
 }>()
 
 const simpleImage = Empty.PRESENTED_IMAGE_SIMPLE
@@ -109,8 +120,13 @@ const formModel = ref({
 
 const loadTree = async () => {
   try {
-    const list = await getFolderTree()
+    // 工作台左树需要「目录 > 流程」两级：流程叶子标题直接取流程名称，与右侧列表完全一致
+    const list = await getFolderTree(true)
     treeData.value = list
+    // 选中的流程被删除后，避免选中态停留在已不存在的节点上
+    if (selectedKey.value && !nodeOf(selectedKey.value).key) {
+      selectedKey.value = ''
+    }
   } catch (e) {
     // handled in interceptor
   }
@@ -125,11 +141,38 @@ const selectRoot = () => {
   emit('select', '')
 }
 
-const onSelect = (keys: any[]) => {
-  if (keys && keys.length > 0) {
-    selectedKey.value = String(keys[0])
-    emit('select', selectedKey.value)
+/** key -> 节点数据，模板里按 key 取节点，避免依赖树组件插槽的字段透传细节 */
+const nodeIndex = computed(() => {
+  const map: Record<string, any> = {}
+  const walk = (nodes: any[]) => {
+    for (const n of nodes) {
+      map[String(n.key)] = n
+      if (n.children && n.children.length) walk(n.children)
+    }
   }
+  walk(filteredTreeData.value)
+  return map
+})
+
+const nodeOf = (key: any) => nodeIndex.value[String(key)] || {}
+
+/** 流程叶子不提供目录维护菜单 */
+const canManage = (key: any) => {
+  const node = nodeOf(key)
+  return node.nodeType !== 'PIPELINE' && !node.synthetic
+}
+
+const onSelect = (keys: any[]) => {
+  if (!keys || keys.length === 0) return
+  const key = String(keys[0])
+  const node = nodeOf(key)
+  if (node.synthetic) return
+  selectedKey.value = key
+  if (node.nodeType === 'PIPELINE') {
+    emit('select-pipeline', String(node.pipelineId))
+    return
+  }
+  emit('select', key)
 }
 
 const filteredTreeData = computed(() => {
@@ -208,6 +251,9 @@ const handleDelete = (id: any) => {
     }
   })
 }
+
+// 流程保存 / 删除后由主界面调用，保证左树流程叶子与右侧列表同步刷新
+defineExpose({ refresh: loadTree })
 </script>
 
 <style scoped>
@@ -263,6 +309,25 @@ const handleDelete = (id: any) => {
   align-items: center;
   width: 100%;
   padding-right: 8px;
+}
+.node-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.node-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.node-type-icon {
+  font-size: 12px;
+  color: #8c8c8c;
+  flex: none;
+}
+.tree-node-title.is-pipeline .node-label {
+  color: rgba(0, 0, 0, 0.72);
 }
 .node-actions {
   display: none;

@@ -29,4 +29,10 @@ public interface EtlPipelineService extends IBaseCrudService<EtlPipeline> {
      * 终止运行中的流程
      */
     boolean cancelRunning(Long id);
+
+    /**
+     * 整体复制流程：抽取 / 转换 / 目标 / 告警配置原样带走，
+     * 生成新编码与「（副本）」名称，调度默认停用，避免与原流程同时触发
+     */
+    EtlPipeline copyPipeline(Long id);
 }
