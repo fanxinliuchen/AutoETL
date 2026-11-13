@@ -23,6 +23,8 @@ export interface ParseResult {
 /** 预留类型列（P0 只记录不生效，P1 才会参与临时表建表） */
 export const FIELD_TYPE_OPTIONS = [
   'TEXT',
+  // utf8mb4 下 n 是字符数：VARCHAR(32) 可存 32 个汉字（96 字节），够放编码/状态/枚举类字段
+  'VARCHAR(32)',
   'VARCHAR(255)',
   'BIGINT',
   'INT',
@@ -131,7 +133,7 @@ export function downloadFieldTemplate() {
     ['2. 一行一个字段；行顺序就是 FieldKeys 顺序，也是临时表的列顺序。'],
     ['3. 字段名只允许字母、数字、下划线和点，不能含空格、逗号或中文。'],
     ['4. 「启用」填否的行不进入 FieldKeys，但会保留在清单里，可随时恢复。'],
-    ['5. 「类型」留空默认 VARCHAR(255)；可选 TEXT / BIGINT / INT / DECIMAL(n,m) / DATE / DATETIME。TEXT 只建议给超长文本，它不能建索引、临时表也更大。'],
+    ['5. 「类型」留空默认 VARCHAR(255)；可选 TEXT / VARCHAR(32) / VARCHAR(255) / BIGINT / INT / DECIMAL(n,m) / DATE / DATETIME。VARCHAR(32) 在 utf8mb4 下可存 32 个汉字。TEXT 只建议给超长文本，它不能建索引、临时表也更大。'],
     ['6. 重复字段名只保留第一条，重复行会给出提示。'],
     ['7. 表头行可保留，也可删除；系统按表头名称识别各列。']
   ]

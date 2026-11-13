@@ -105,9 +105,15 @@ public class AutoInsertSqlBuilder {
 
             WriteModeEnum mode = pipeline.getWriteMode() == null
                     ? WriteModeEnum.APPEND : pipeline.getWriteMode();
+            // UPSERT 的冲突键直接取目标表真实主键，界面上不再手填
+            List<String> targetKeys = mode == WriteModeEnum.SYNC ? List.of() : primaryKeyColumns(conn, targetTable);
             String sql = mode == WriteModeEnum.SYNC
                     ? buildSync(conn, pipeline, targetTable, stageTable, targetColumns, matched, stageIndex, logBuffer)
-                    : assemble(pipeline, targetTable, stageTable, matched, stageIndex);
+                    : assemble(pipeline, targetTable, stageTable, matched, stageIndex, targetKeys);
+            if (mode == WriteModeEnum.UPSERT && targetKeys.isEmpty() && logBuffer != null) {
+                logBuffer.append("[处理] 提示：目标表没有主键，UPSERT 会退化为追加插入，重复运行会产生重复行。"
+                        + "可在第 4 步「更新（新建）目标表」里把业务唯一列设为主键\n");
+            }
             if (logBuffer != null) {
                 logBuffer.append("[处理] 未配置转换 SQL，已按目标表结构自动生成入库脚本（")
                         .append(matched.size()).append(" 列）\n");
@@ -141,18 +147,25 @@ public class AutoInsertSqlBuilder {
         }
         requireColumn(targetColumns, config.getScopeField(), "删除判定范围字段");
 
-        // 主键必须具备，否则无法判断"这条是否还在"
-        Set<String> keys = parseKeys(pipeline.getUpsertKeys());
+        // 比对主键直接取目标表真实主键：软删除靠「目标表有、本次没抽到」倒推，没有主键就无从比对
+        Set<String> keys = primaryKeyColumns(conn, targetTable).stream()
+                .map(String::toLowerCase)
+                .filter(StrUtil::isNotBlank)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
         if (keys.isEmpty()) {
             throw new BizException(ErrorCode.PARAM_ERROR,
-                    "增量同步模式需要配置比对主键（如金蝶分录内码 FEntity_FENTRYID），否则无法判定哪些数据已删除");
+                    "增量同步需要目标表有主键：系统靠「目标表有、本次没抽到」倒推删除，没有主键无从比对。"
+                            + "请先在「更新（新建）目标表」里把业务唯一列设为主键");
         }
         for (String key : keys) {
             if (matched.stream().noneMatch(c -> c.equalsIgnoreCase(key))) {
                 throw new BizException(ErrorCode.PARAM_ERROR,
-                        "比对主键 " + key + " 不在「目标表 ∩ 抽取字段」中，无法用于比对。"
+                        "主键列 " + key + " 不在「目标表 ∩ 抽取字段」中，无法用于比对。"
                                 + "请确认该字段已抽取且目标表存在同名列");
             }
+        }
+        if (logBuffer != null) {
+            logBuffer.append("[同步] 比对主键（取自目标表主键）: ").append(String.join(", ", keys)).append("\n");
         }
 
         // 熔断：待删行数占范围内行数比例过高时中止，避免窗口填错导致大面积误标
@@ -261,7 +274,8 @@ public class AutoInsertSqlBuilder {
                             String targetTable,
                             String stageTable,
                             List<String> matched,
-                            Map<String, String> stageIndex) {
+                            Map<String, String> stageIndex,
+                            List<String> targetKeyColumns) {
         String targetRef = tableRef(targetTable);
         String columnList = matched.stream()
                 .map(c -> "`" + escape(c) + "`")
@@ -284,12 +298,10 @@ public class AutoInsertSqlBuilder {
                 .append(" FROM `").append(escape(stageTable)).append("`");
 
         if (mode == WriteModeEnum.UPSERT) {
-            Set<String> keys = parseKeys(pipeline.getUpsertKeys());
-            if (keys.isEmpty()) {
-                throw new BizException(ErrorCode.PARAM_ERROR,
-                        "写入模式为 UPSERT，但未配置业务主键。请在第 4 步填写主键字段，"
-                                + "或改用「追加写入 / 清空覆盖」（自动生成脚本无法凭空推断冲突键）");
-            }
+            // 冲突判定由 MySQL 按目标表真实的主键/唯一索引完成，这里只需把主键列排除在 UPDATE 之外
+            Set<String> keys = targetKeyColumns.stream()
+                    .map(String::toLowerCase)
+                    .collect(Collectors.toSet());
             List<String> updateColumns = matched.stream()
                     .filter(c -> !keys.contains(c.toLowerCase()))
                     .toList();
@@ -449,17 +461,6 @@ public class AutoInsertSqlBuilder {
         }
     }
 
-    static Set<String> parseKeys(String upsertKeys) {
-        if (StrUtil.isBlank(upsertKeys)) {
-            return Collections.emptySet();
-        }
-        return Arrays.stream(upsertKeys.split(","))
-                .map(String::trim)
-                .filter(StrUtil::isNotBlank)
-                .map(k -> k.toLowerCase())
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-    }
-
     /**
      * 读取表的所有列名（按定义顺序）
      */
@@ -493,6 +494,31 @@ public class AutoInsertSqlBuilder {
                 + "WHERE TABLE_SCHEMA = " + (ref.schema == null ? "DATABASE()" : "?")
                 + " AND TABLE_NAME = ? AND IS_NULLABLE = 'NO' AND COLUMN_DEFAULT IS NULL"
                 + " AND EXTRA NOT LIKE '%auto_increment%' ORDER BY ORDINAL_POSITION";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int index = 1;
+            if (ref.schema != null) {
+                ps.setString(index++, ref.schema);
+            }
+            ps.setString(index, ref.table);
+            List<String> result = new ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    result.add(rs.getString(1));
+                }
+            }
+            return result;
+        }
+    }
+
+    /**
+     * 目标表主键列（原始大小写）。UPSERT 用它把主键列排除在 ON DUPLICATE KEY UPDATE 之外——
+     * 冲突判定本身由 MySQL 按表上真实的主键/唯一索引完成，不需要界面再填一遍。
+     */
+    private List<String> primaryKeyColumns(Connection conn, String table) throws Exception {
+        TableRef ref = TableRef.of(table);
+        String sql = "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE "
+                + "WHERE TABLE_SCHEMA = " + (ref.schema == null ? "DATABASE()" : "?")
+                + " AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' ORDER BY ORDINAL_POSITION";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int index = 1;
             if (ref.schema != null) {

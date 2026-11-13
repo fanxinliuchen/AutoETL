@@ -188,8 +188,13 @@ public class TargetTableSchemaService {
                 clauses.add(clause.toString());
             }
             for (ColumnDef def : request.getAddColumns()) {
+                // 新增列同时设为主键时必须声明 NOT NULL：MySQL 对主键列强制非空，
+                // 声明 NULL 会让整条 ALTER 报 1171 并整体回滚（MySQL 8.4 实测）
+                boolean asPrimaryKey = request.getPrimaryKeys().stream()
+                        .anyMatch(key -> key.equalsIgnoreCase(def.getName()));
                 StringBuilder clause = new StringBuilder("ADD COLUMN ")
-                        .append(quote(def.getName())).append(" ").append(def.getType()).append(" NULL");
+                        .append(quote(def.getName())).append(" ").append(def.getType())
+                        .append(asPrimaryKey ? " NOT NULL" : " NULL");
                 if (StrUtil.isNotBlank(def.getComment())) {
                     clause.append(" COMMENT '").append(def.getComment().replace("'", "''")).append("'");
                 }

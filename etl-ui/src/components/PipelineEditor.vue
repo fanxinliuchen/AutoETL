@@ -1683,24 +1683,7 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                       </a-select>
                     </a-form-item>
                   </a-col>
-                  <a-col :span="12" v-if="formData.writeMode === 'UPSERT' || formData.writeMode === 'SYNC'">
-                    <a-form-item
-                      :label="
-                        formData.writeMode === 'SYNC'
-                          ? '比对主键列 (逗号分隔，如 FEntity_FENTRYID)'
-                          : '唯一主键列 (逗号分隔)'
-                      "
-                    >
-                      <a-input
-                        v-model:value="formData.upsertKeys"
-                        :placeholder="
-                          formData.writeMode === 'SYNC'
-                            ? '金蝶分录内码，如 FEntity_FENTRYID'
-                            : '例如：id 或 material_code'
-                        "
-                      />
-                    </a-form-item>
-                  </a-col>
+                  <!-- UPSERT 冲突键与 SYNC 比对主键都取目标表真实主键，不在界面上配置 -->
                 </a-row>
 
                 <!-- 增量同步配置 -->
@@ -1763,9 +1746,9 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                   </a-row>
                   <div class="fk-hint">
                     执行时：在「范围字段 ≥ 今天 − N 天」的窗口内，目标表有、本次抽取没有的行 → 标记删除；
-                    本次数据按主键合并写入，并把删除标记复位。第 3 步的转换 SQL 需<b>留空</b>，由系统生成脚本。
-                    目标表需先具备软删除列（如 <code>is_deleted TINYINT DEFAULT 0</code>、
-                    <code>delete_time DATETIME NULL</code>）。
+                    本次数据按<b>目标表主键</b>合并写入，并把删除标记复位。第 3 步的转换 SQL 需<b>留空</b>，由系统生成脚本。
+                    目标表需先具备主键与软删除列（如 <code>is_deleted TINYINT DEFAULT 0</code>、
+                    <code>delete_time DATETIME NULL</code>），主键在「更新（新建）目标表」里配置。
                   </div>
                 </div>
 
@@ -1806,6 +1789,7 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                       <span class="map-arrow"></span>
                       <span>目标表字段</span>
                       <span>目标类型</span>
+                      <span class="map-pk-head">主键</span>
                       <span>状态</span>
                     </div>
                     <div v-for="row in mappingRows" :key="row.key" class="map-row">
@@ -1816,6 +1800,12 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                       </span>
                       <span class="map-name">{{ row.targetName || '—' }}</span>
                       <span class="map-type">{{ row.targetType || '' }}</span>
+                      <span class="map-pk-cell">
+                        <a-tooltip v-if="row.primaryKey" title="目标表主键">
+                          <key-outlined class="map-pk" />
+                        </a-tooltip>
+                        <span v-else class="map-na">—</span>
+                      </span>
                       <span :class="['map-status', row.statusClass]">{{ row.statusText }}</span>
                     </div>
                   </div>
@@ -1921,14 +1911,15 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
       </a-form>
     </div>
 
-    <!-- 目标表结构变更确认 -->
+    <!-- 目标表结构变更确认：左右对照单表，一张表管完增删改列与主键 -->
     <a-modal
       v-model:open="schemaModal.visible"
-      :title="`更新目标表：${formData.targetTable || ''}`"
-      width="820px"
+      :title="`配置目标表结构：${formData.targetTable || ''}`"
+      width="1120px"
       :confirm-loading="schemaModal.submitting"
-      ok-text="确认更新"
+      ok-text="确认执行"
       cancel-text="取消"
+      :body-style="{ padding: '12px 16px 0' }"
       @ok="submitSchema"
     >
       <a-alert
@@ -1937,78 +1928,132 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
         show-icon
         message="目标表不存在，确认后将按左侧字段新建"
         description="主键可留空；若写入模式为 SYNC，建议把比对主键设为 PRIMARY KEY，否则合并写入会重复。"
-        style="margin-bottom: 12px"
-      />
-      <a-alert
-        v-else
-        type="info"
-        show-icon
-        :message="schemaPlanText"
-        description="类型修改只改列类型，NULL 约束按原样保留（主键列强制 NOT NULL）；删除列不可恢复。变更会立即在目标库执行。"
-        style="margin-bottom: 12px"
+        style="margin-bottom: 10px"
       />
 
-      <div class="schema-section">
-        <div class="schema-title">新增字段（左侧有、目标表无）</div>
-        <div v-if="!schemaModal.addColumns.length" class="schema-empty">无</div>
-        <div v-for="(col, i) in schemaModal.addColumns" :key="col.name" class="schema-row">
-          <span class="schema-name">{{ col.name }}</span>
-          <a-input v-model:value="col.type" size="small" style="width: 220px" />
-          <a-button size="small" type="link" danger @click="schemaModal.addColumns.splice(i, 1)">
-            移除
-          </a-button>
-        </div>
+      <div class="sch-summary">
+        <span>共 <b>{{ schemaStat.total }}</b> 行</span>
+        <span>一致 <b>{{ schemaStat.match }}</b></span>
+        <span class="is-warn">类型不一致 <b>{{ schemaStat.diff }}</b></span>
+        <span class="is-new">待新增 <b>{{ schemaStat.add }}</b></span>
+        <span class="is-extra">待删除 <b>{{ schemaStat.drop }}</b></span>
+        <span class="is-pk">主键 <b>{{ schemaStat.pk }}</b></span>
       </div>
 
-      <div class="schema-section">
-        <div class="schema-title">类型变更（目标表已有、与左侧类型不一致）</div>
-        <div v-if="!schemaModal.modifyColumns.length" class="schema-empty">无</div>
-        <div v-for="col in schemaModal.modifyColumns" :key="col.name" class="schema-row">
-          <a-checkbox v-model:checked="col.checked" :disabled="col.autoIncrement" />
-          <span class="schema-name">{{ col.name }}</span>
-          <span class="schema-type-old">{{ col.currentType }}</span>
-          <span class="schema-arrow">→</span>
-          <a-input
-            v-model:value="col.type"
-            size="small"
-            style="width: 180px"
-            :disabled="!col.checked || col.autoIncrement"
-          />
-        </div>
-        <div v-if="schemaModal.modifyColumns.length" class="fk-hint">
-          勾选后按右侧类型执行 MODIFY COLUMN；自增列不支持改类型。TEXT 列要先改成
-          VARCHAR(n) 才能设为主键。
-        </div>
-      </div>
-
-      <div class="schema-section">
-        <div class="schema-title">删除字段（目标表有、左侧无）</div>
-        <div v-if="!schemaModal.dropCandidates.length" class="schema-empty">无</div>
-        <a-checkbox-group v-else v-model:value="schemaModal.dropColumns">
-          <a-checkbox v-for="c in schemaModal.dropCandidates" :key="c" :value="c">{{ c }}</a-checkbox>
-        </a-checkbox-group>
-        <div v-if="schemaModal.dropCandidates.length" class="fk-hint">
-          默认不勾选；只有勾选的列才会执行 DROP COLUMN（不可恢复，请确认下游没有依赖）
-        </div>
-      </div>
-
-      <div class="schema-section">
-        <div class="schema-title">主键（可多选）</div>
-        <a-checkbox-group v-model:value="schemaModal.primaryKeys">
-          <a-checkbox v-for="f in schemaModal.keyCandidates" :key="f" :value="f">{{ f }}</a-checkbox>
-        </a-checkbox-group>
-        <div class="fk-hint">
-          当前主键：{{ schemaModal.currentKeys.length ? schemaModal.currentKeys.join(', ') : '无' }}；
-          勾选后会先删除旧主键再添加新主键，主键列自动设为 NOT NULL
-        </div>
-        <a-checkbox
-          v-if="schemaModal.currentKeys.length"
-          v-model:checked="schemaModal.dropPrimaryKey"
-          style="margin-top: 6px"
+      <div class="sch-toolbar">
+        <a-input
+          v-model:value="schemaModal.keyword"
+          size="small"
+          placeholder="搜索字段名"
+          allow-clear
+          class="sch-search"
         >
-          移除现有主键（上面不选新主键时即清空主键）
-        </a-checkbox>
+          <template #prefix><search-outlined /></template>
+        </a-input>
+        <a-radio-group v-model:value="schemaModal.filter" size="small" button-style="solid">
+          <a-radio-button value="diff">仅差异 {{ schemaStat.diffTotal }}</a-radio-button>
+          <a-radio-button value="all">全部 {{ schemaStat.total }}</a-radio-button>
+        </a-radio-group>
+        <a-select v-model:value="schemaModal.sortMode" size="small" class="sch-sort">
+          <a-select-option value="diff">差异置顶</a-select-option>
+          <a-select-option value="origin">按原始列序</a-select-option>
+        </a-select>
+        <span class="sch-toolbar-tip">
+          勾选框控制本次是否执行该列的变更；钥匙点亮即设为主键（主键行在「仅差异」下也常驻，便于随时取消）
+        </span>
       </div>
+
+      <div class="sch-scroll">
+        <table class="sch-table">
+          <thead>
+            <tr>
+              <th class="c-check"></th>
+              <th class="c-act"></th>
+              <th class="c-name">源字段（抽取）</th>
+              <th class="c-type">源类型</th>
+              <th class="c-arrow"></th>
+              <th class="c-name">目标字段</th>
+              <th class="c-ttype">目标类型</th>
+              <th class="c-pk">主键</th>
+              <th class="c-status">状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in schemaVisibleRows"
+              :key="row.key"
+              :class="['sch-row', `is-${row.status.toLowerCase()}`]"
+            >
+              <td class="c-check">
+                <a-checkbox
+                  v-if="row.status !== 'MATCH'"
+                  :checked="row.checked"
+                  :disabled="row.status === 'MISSING_IN_SOURCE' && row.pinned"
+                  :title="row.pinned ? '当前主键列不可删除' : ''"
+                  @change="(e: any) => onRowCheck(row, !!e.target.checked)"
+                />
+                <span v-else class="sch-na">—</span>
+              </td>
+              <td class="c-act">
+                <span :class="['sch-act', `is-${row.status.toLowerCase()}`]">{{ actText(row) }}</span>
+              </td>
+              <td class="c-name">
+                <span class="sch-mono">{{ row.sourceName || '—' }}</span>
+              </td>
+              <td class="c-type sch-mono">{{ row.sourceType || '—' }}</td>
+              <td class="c-arrow">
+                <span
+                  v-if="row.status === 'MISSING_IN_TARGET'"
+                  class="sch-arrow is-new">→</span>
+                <span
+                  v-else-if="row.status === 'MISSING_IN_SOURCE'"
+                  class="sch-arrow is-extra">←</span>
+                <span v-else class="sch-arrow">⇄</span>
+              </td>
+              <td class="c-name">
+                <span v-if="row.targetName" class="sch-mono">{{ row.targetName }}</span>
+                <span v-else class="sch-pending">待新增</span>
+              </td>
+              <td class="c-ttype">
+                <a-select
+                  v-if="row.typeEditable"
+                  v-model:value="row.editType"
+                  size="small"
+                  show-search
+                  :options="schemaModal.typeOptions"
+                  class="sch-type-select"
+                  :title="`当前 ${row.targetType || '（无此列）'} → 执行 ${row.editType}`"
+                />
+                <span v-else class="sch-mono sch-type-ro">{{ row.targetType || '—' }}</span>
+              </td>
+              <td class="c-pk">
+                <button
+                  type="button"
+                  class="sch-pk"
+                  :class="{ 'is-on': row.isPrimary }"
+                  :disabled="row.status === 'MISSING_IN_SOURCE'"
+                  :title="pkTitle(row)"
+                  @click="togglePrimary(row)"
+                >
+                  <key-outlined />
+                </button>
+              </td>
+              <td class="c-status">
+                <span :class="['map-status', row.statusClass]">{{ statusLabel(row) }}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="!schemaVisibleRows.length" class="sch-empty">
+          {{
+            schemaModal.rows.length
+              ? '没有符合条件的字段，换个关键字或切到「全部」'
+              : '暂无字段：左侧来自第 2 步抽取字段清单，请先维护字段'
+          }}
+        </div>
+      </div>
+
+      <div class="sch-plan">{{ schemaPlanText }}</div>
     </a-modal>
 
     <!-- 实时数据抽取预览弹窗 -->
@@ -2060,7 +2105,8 @@ import {
   FileAddOutlined,
   PlusOutlined,
   ApiOutlined,
-  BulbOutlined
+  BulbOutlined,
+  SearchOutlined
 } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
 import SqlEditor from './SqlEditor.vue'
@@ -2562,6 +2608,8 @@ interface MappingRow {
   sourceType?: string
   targetName?: string
   targetType?: string
+  /** 目标表该列是否为主键（来自 information_schema，点「重新获取」时刷新） */
+  primaryKey?: boolean
   status: MappingStatus
   statusText: string
   statusClass: string
@@ -2571,12 +2619,6 @@ const targetTableOptions = ref<{ value: string }[]>([])
 const targetColumns = ref<TargetTableColumn[]>([])
 const mappingLoading = ref(false)
 let lastMappingTable = ''
-
-const parseKeysLower = (keys?: string) =>
-  (keys || '')
-    .split(',')
-    .map((k) => k.trim().toLowerCase())
-    .filter(Boolean)
 
 // 左侧：第 2 步抽取字段；增量同步模式自动补上软删除列
 const sourceFields = computed(() => {
@@ -2625,6 +2667,7 @@ const mappingRows = computed<MappingRow[]>(() => {
         sourceType: s.type,
         targetName: t.name,
         targetType: t.columnType,
+        primaryKey: t.primaryKey,
         status: same ? 'MATCH' : 'TYPE_DIFF',
         statusText: same ? '已匹配' : '类型不一致',
         statusClass: same ? 'is-ok' : 'is-warn'
@@ -2648,6 +2691,7 @@ const mappingRows = computed<MappingRow[]>(() => {
       key: `t_${t.name}`,
       targetName: t.name,
       targetType: t.columnType,
+      primaryKey: t.primaryKey,
       status: 'MISSING_IN_SOURCE',
       statusText: '目标表多余',
       statusClass: 'is-extra'
@@ -2662,11 +2706,17 @@ const mappingSummary = computed(() => {
   const miss = mappingRows.value.filter((r) => r.status === 'MISSING_IN_TARGET').length
   const extra = mappingRows.value.filter((r) => r.status === 'MISSING_IN_SOURCE').length
   const diff = mappingRows.value.filter((r) => r.status === 'TYPE_DIFF').length
+  const pks = mappingRows.value
+    .filter((r) => r.primaryKey)
+    .map((r) => r.targetName)
+    .filter(Boolean)
   const parts = [`共 ${mappingRows.value.length} 行`]
   if (miss) parts.push(`缺 ${miss} 列`)
   if (extra) parts.push(`多 ${extra} 列`)
   if (diff) parts.push(`类型不一致 ${diff}`)
   if (!miss && !extra && !diff) parts.push('结构与映射一致')
+  // 主键来自 information_schema，目标表结构一变这里跟着变
+  parts.push(pks.length ? `主键 ${pks.join(' + ')}` : '无主键')
   return parts.join(' · ')
 })
 
@@ -2708,81 +2758,174 @@ const onTargetTableChange = async () => {
   await refreshMapping()
 }
 
-// ===== 目标表结构变更确认弹窗 =====
-interface ModifyColumnDraft {
-  name: string
-  currentType: string
-  type: string
-  comment?: string
-  nullable: boolean
-  autoIncrement: boolean
+// ===== 目标表结构变更确认弹窗（左右对照单表）=====
+interface SchemaRowVM {
+  key: string
+  order: number
+  sourceName?: string
+  sourceType?: string
+  targetName?: string
+  targetType?: string
+  /** 本次要落到的目标类型：改类型/新增列默认对齐源类型 */
+  editType: string
+  status: MappingStatus
+  statusClass: string
+  /** 勾选=本次执行该列的变更 */
   checked: boolean
+  /** 勾选=作为主键 */
+  isPrimary: boolean
+  /** 目标表当前的主键列，必须常驻列表，取消后也还能找回来 */
+  pinned: boolean
+  /** 目标类型是否可改（一致行、待删除行、自增列不可改） */
+  typeEditable: boolean
+  autoIncrement: boolean
+  nullable: boolean
+  comment?: string
+}
+
+// 差异置顶排序权重：一眼先看见要动的列
+const SCHEMA_STATUS_WEIGHT: Record<string, number> = {
+  TYPE_DIFF: 0,
+  MISSING_IN_TARGET: 1,
+  MISSING_IN_SOURCE: 2,
+  MATCH: 3
 }
 
 const schemaModal = ref({
   visible: false,
   submitting: false,
   tableExists: false,
-  addColumns: [] as { name: string; type: string }[],
-  modifyColumns: [] as ModifyColumnDraft[],
-  dropCandidates: [] as string[],
-  dropColumns: [] as string[],
-  currentKeys: [] as string[],
-  keyCandidates: [] as string[],
-  primaryKeys: [] as string[],
-  dropPrimaryKey: false
+  rows: [] as SchemaRowVM[],
+  keyword: '',
+  filter: 'diff' as 'diff' | 'all',
+  sortMode: 'diff' as 'diff' | 'origin',
+  typeOptions: [] as { value: string; label: string }[]
 })
 
 const openSchemaModal = () => {
-  const add = mappingRows.value
-    .filter((r) => r.status === 'MISSING_IN_TARGET' && r.sourceName)
-    .map((r) => ({ name: r.sourceName as string, type: r.sourceType || 'VARCHAR(255)' }))
-  // 目标表已有但类型与左侧不一致：默认全部勾选，按左侧类型改（自增列跳过，MODIFY 会丢自增属性）
-  const modify: ModifyColumnDraft[] = mappingRows.value
-    .filter((r) => r.status === 'TYPE_DIFF' && r.targetName)
-    .map((r) => {
-      const col = targetColumns.value.find(
-        (c) => c.name.toLowerCase() === (r.targetName as string).toLowerCase()
-      )
-      return {
-        name: r.targetName as string,
-        currentType: r.targetType || '',
-        type: r.sourceType || 'VARCHAR(255)',
-        comment: col?.comment,
-        nullable: col ? col.nullable : true,
-        autoIncrement: !!col?.autoIncrement,
-        checked: !col?.autoIncrement
-      }
-    })
-  const drop = mappingRows.value
-    .filter((r) => r.status === 'MISSING_IN_SOURCE' && r.targetName)
-    .map((r) => r.targetName as string)
-  const currentKeys = targetColumns.value.filter((c) => c.primaryKey).map((c) => c.name)
-  const candidates = sourceFieldNames.value
+  const rows: SchemaRowVM[] = mappingRows.value.map((r, i) => {
+    const col = r.targetName
+      ? targetColumns.value.find((c) => c.name.toLowerCase() === (r.targetName as string).toLowerCase())
+      : undefined
+    const autoInc = !!col?.autoIncrement
+    // 自增列不参与改类型：MODIFY COLUMN 会把 AUTO_INCREMENT 属性丢掉
+    const canEditType =
+      (r.status === 'TYPE_DIFF' && !autoInc) || r.status === 'MISSING_IN_TARGET'
+    return {
+      key: r.key,
+      order: i,
+      sourceName: r.sourceName,
+      sourceType: r.sourceType,
+      targetName: r.targetName,
+      targetType: r.targetType,
+      editType: (
+        (canEditType ? r.sourceType : r.targetType || r.sourceType) || 'VARCHAR(255)'
+      ).toUpperCase(),
+      status: r.status,
+      statusClass: r.statusClass,
+      checked: canEditType,
+      isPrimary: !!col?.primaryKey,
+      pinned: !!col?.primaryKey,
+      typeEditable: canEditType,
+      autoIncrement: autoInc,
+      nullable: col ? col.nullable : true,
+      comment: col?.comment
+    }
+  })
 
-  // 主键默认沿用现有主键；没有则按增量同步的比对主键预选
-  let defaultKeys = currentKeys.filter((k) =>
-    candidates.some((c) => c.toLowerCase() === k.toLowerCase())
-  )
-  if (!defaultKeys.length && formData.value.writeMode === 'SYNC') {
-    const upsertKeys = parseKeysLower(formData.value.upsertKeys)
-    defaultKeys = candidates.filter((c) => upsertKeys.includes(c.toLowerCase()))
-  }
+  // 主键一律以目标表现有主键为准（isPrimary 已在上面的 map 里取 col.primaryKey），
+  // 不再按流程配置预选
+
+  const typeSet = new Set<string>(FIELD_TYPE_OPTIONS)
+  targetColumns.value.forEach((c) => c.columnType && typeSet.add(c.columnType.toUpperCase()))
+  rows.forEach((r) => r.editType && typeSet.add(r.editType))
 
   schemaModal.value = {
     visible: true,
     submitting: false,
     tableExists: targetColumns.value.length > 0,
-    addColumns: add,
-    modifyColumns: modify,
-    dropCandidates: drop,
-    // 默认不勾选：以「改类型 / 补列」为主的操作不该顺手把目标表多余列删掉
-    dropColumns: [],
-    currentKeys,
-    keyCandidates: candidates,
-    primaryKeys: defaultKeys,
-    dropPrimaryKey: false
+    rows,
+    keyword: '',
+    // 默认只给差异：811 行一致的数据压在前面，等于让人滚 800 行去找那 41 个差异
+    filter: 'diff',
+    sortMode: 'diff',
+    typeOptions: [...typeSet].map((t) => ({ value: t, label: t }))
   }
+}
+
+const schemaStat = computed(() => {
+  const rows = schemaModal.value.rows
+  return {
+    total: rows.length,
+    match: rows.filter((r) => r.status === 'MATCH').length,
+    diff: rows.filter((r) => r.status === 'TYPE_DIFF').length,
+    add: rows.filter((r) => r.status === 'MISSING_IN_TARGET').length,
+    drop: rows.filter((r) => r.status === 'MISSING_IN_SOURCE').length,
+    pk: rows.filter((r) => r.isPrimary).length,
+    diffTotal: rows.filter((r) => r.status !== 'MATCH' || r.pinned).length
+  }
+})
+
+const schemaVisibleRows = computed(() => {
+  const { rows, keyword, filter, sortMode } = schemaModal.value
+  const kw = keyword.trim().toLowerCase()
+  const list = rows.filter((r) => {
+    if (filter === 'diff' && r.status === 'MATCH' && !r.pinned) return false
+    if (!kw) return true
+    return `${r.sourceName || ''} ${r.targetName || ''}`.toLowerCase().includes(kw)
+  })
+  if (sortMode === 'origin') return list
+  return [...list].sort(
+    (a, b) => SCHEMA_STATUS_WEIGHT[a.status] - SCHEMA_STATUS_WEIGHT[b.status] || a.order - b.order
+  )
+})
+
+const actText = (row: SchemaRowVM) => {
+  if (row.status === 'TYPE_DIFF') return '改'
+  if (row.status === 'MISSING_IN_TARGET') return '增'
+  if (row.status === 'MISSING_IN_SOURCE') return '删'
+  return '—'
+}
+
+const statusLabel = (row: SchemaRowVM) => {
+  if (row.status === 'MATCH') return row.isPrimary ? '一致 · 主键' : '一致'
+  if (row.status === 'TYPE_DIFF') return row.checked ? '类型不一致' : '跳过'
+  if (row.status === 'MISSING_IN_TARGET') return row.checked ? '待新增' : '跳过'
+  return row.checked ? '待删除' : '保留'
+}
+
+const pkTitle = (row: SchemaRowVM) => {
+  if (row.status === 'MISSING_IN_SOURCE') return '目标表多余的列不能设为主键'
+  return row.isPrimary ? '点击取消主键' : '设为主键'
+}
+
+const onRowCheck = (row: SchemaRowVM, checked: boolean) => {
+  if (checked && row.status === 'MISSING_IN_SOURCE' && row.pinned) {
+    message.warning(`${row.targetName} 是当前主键列，不能删除；请先取消它的主键`)
+    return
+  }
+  row.checked = checked
+}
+
+const togglePrimary = (row: SchemaRowVM) => {
+  if (row.status === 'MISSING_IN_SOURCE') {
+    message.warning('目标表多余的列不能设为主键')
+    return
+  }
+  if (row.isPrimary) {
+    row.isPrimary = false
+    return
+  }
+  const type = (row.editType || '').toUpperCase()
+  // TEXT/BLOB 没有长度前缀不能建主键，MySQL 会报 1170
+  if (type.startsWith('TEXT') || type.startsWith('BLOB')) {
+    message.warning(
+      `${row.targetName || row.sourceName} 是 ${type} 类型，不能直接做主键，请先把类型改成 VARCHAR(n)`
+    )
+    return
+  }
+  row.isPrimary = true
+  if (row.status === 'MISSING_IN_TARGET') row.checked = true
 }
 
 const sameKeySet = (current: string[], desired: string[]) => {
@@ -2791,19 +2934,26 @@ const sameKeySet = (current: string[], desired: string[]) => {
   return desired.every((k) => lower.includes(k.toLowerCase()))
 }
 
-// 弹窗顶部的变更摘要
+// 弹窗底部的变更摘要
 const schemaPlanText = computed(() => {
-  const m = schemaModal.value
+  const rows = schemaModal.value.rows
+  const add = rows.filter((r) => r.status === 'MISSING_IN_TARGET' && r.checked).length
+  const mod = rows.filter((r) => r.status === 'TYPE_DIFF' && r.checked).length
+  const drop = rows.filter((r) => r.status === 'MISSING_IN_SOURCE' && r.checked).length
+  const keys = rows
+    .filter((r) => r.isPrimary)
+    .map((r) => r.targetName || r.sourceName || '')
+    .filter(Boolean)
+  const currentKeys = targetColumns.value.filter((c) => c.primaryKey).map((c) => c.name)
   const parts: string[] = []
-  if (m.addColumns.length) parts.push(`新增 ${m.addColumns.length} 列`)
-  const mods = m.modifyColumns.filter((c) => c.checked && !c.autoIncrement).length
-  if (mods) parts.push(`修改类型 ${mods} 列`)
-  if (m.dropColumns.length) parts.push(`删除 ${m.dropColumns.length} 列`)
-  const pkChanged =
-    m.primaryKeys.length > 0 && !sameKeySet(m.currentKeys, m.primaryKeys)
-  if (m.dropPrimaryKey && !m.primaryKeys.length) parts.push('移除主键')
-  else if (pkChanged) parts.push(`主键改为 ${m.primaryKeys.join(' + ')}`)
-  return parts.length ? `拟执行：${parts.join('、')}` : '未检测到结构差异：可改类型、勾选主键或手动增删列'
+  if (add) parts.push(`新增 ${add} 列`)
+  if (mod) parts.push(`改类型 ${mod} 列`)
+  if (drop) parts.push(`删除 ${drop} 列`)
+  if (!keys.length && currentKeys.length) parts.push('清空主键')
+  else if (keys.length && !sameKeySet(currentKeys, keys)) parts.push(`主键改为 ${keys.join(' + ')}`)
+  return parts.length
+    ? `拟执行：${parts.join(' · ')}`
+    : '未检测到变更：勾选要执行的列，或用钥匙调整主键'
 })
 
 const submitSchema = async () => {
@@ -2811,41 +2961,53 @@ const submitSchema = async () => {
     message.warning('请先选择目标数据源与目标表')
     return
   }
-  const mods = schemaModal.value.modifyColumns.filter((c) => c.checked && !c.autoIncrement)
-  const pkChanged =
-    schemaModal.value.primaryKeys.length > 0 &&
-    !sameKeySet(schemaModal.value.currentKeys, schemaModal.value.primaryKeys)
-  const dropPk = schemaModal.value.dropPrimaryKey && schemaModal.value.currentKeys.length > 0
+  const rows = schemaModal.value.rows
+  const addColumns = rows
+    .filter((r) => r.status === 'MISSING_IN_TARGET' && r.checked && r.sourceName)
+    .map((r) => ({ name: r.sourceName as string, type: r.editType || 'VARCHAR(255)' }))
+  const modifyColumns = rows
+    .filter((r) => r.status === 'TYPE_DIFF' && r.checked && r.targetName && !r.autoIncrement)
+    .map((r) => ({
+      name: r.targetName as string,
+      type: r.editType || r.sourceType || 'VARCHAR(255)',
+      comment: r.comment,
+      // 主键列必须 NOT NULL，其余列保持原有约束
+      nullable: r.isPrimary ? false : r.nullable
+    }))
+  const dropColumns = rows
+    .filter((r) => r.status === 'MISSING_IN_SOURCE' && r.checked && r.targetName)
+    .map((r) => r.targetName as string)
+  const primaryKeys = rows
+    .filter((r) => r.isPrimary)
+    .map((r) => r.targetName || r.sourceName || '')
+    .filter(Boolean)
+
+  const currentKeys = targetColumns.value.filter((c) => c.primaryKey).map((c) => c.name)
+  const pkChanged = primaryKeys.length > 0 && !sameKeySet(currentKeys, primaryKeys)
+  // 原有主键全被取消且没选新的 = 清空主键；后端靠这个标记区分「不改」与「清空」
+  const dropPrimaryKey = primaryKeys.length === 0 && currentKeys.length > 0
+
   if (
-    !schemaModal.value.addColumns.length &&
-    !schemaModal.value.dropColumns.length &&
-    !mods.length &&
+    !addColumns.length &&
+    !dropColumns.length &&
+    !modifyColumns.length &&
     !pkChanged &&
-    !dropPk
+    !dropPrimaryKey
   ) {
-    message.warning('没有需要变更的字段：新增/删除列、类型变更、主键都没有改动')
+    message.warning('没有需要变更的内容：勾选要执行的列，或调整主键')
     return
   }
+
   schemaModal.value.submitting = true
   try {
     const res = await applyTargetSchema({
       datasourceId: formData.value.targetDsId,
       table: formData.value.targetTable.trim(),
-      addColumns: schemaModal.value.addColumns,
-      modifyColumns: mods.map((c) => ({
-        name: c.name,
-        type: c.type,
-        comment: c.comment,
-        // 主键列必须 NOT NULL，其余保持原样
-        nullable: schemaModal.value.primaryKeys.some(
-          (k) => k.toLowerCase() === c.name.toLowerCase()
-        )
-          ? false
-          : c.nullable
-      })),
-      dropColumns: schemaModal.value.dropColumns,
-      primaryKeys: schemaModal.value.primaryKeys,
-      dropPrimaryKey: schemaModal.value.dropPrimaryKey
+      addColumns,
+      modifyColumns,
+      dropColumns,
+      primaryKeys,
+      dropPrimaryKey
     })
     message.success(
       res.created ? `已新建目标表 ${res.table}` : `目标表已更新，执行 ${res.statements} 条语句`
@@ -2857,6 +3019,7 @@ const submitSchema = async () => {
     schemaModal.value.submitting = false
   }
 }
+
 // table=结构化条件，text=直接编辑 FilterString
 const filterMode = ref<'table' | 'text'>('table')
 
@@ -3191,9 +3354,12 @@ const kingdeeColumns: any[] = [
 const fieldTypeSelectOptions = FIELD_TYPE_OPTIONS.map((t) => ({ label: t, value: t }))
 const fieldColumns: any[] = [
   { title: '序号', dataIndex: 'idx', width: 56, align: 'center' },
-  { title: '字段名 (FieldKey)', dataIndex: 'fieldKey' },
-  { title: '中文名', dataIndex: 'label', width: 150 },
-  { title: '类型', dataIndex: 'type', width: 132 },
+  // 字段名限宽：金蝶标识很少超过 24 字符，留 300 足够，剩下的宽度让给中文名
+  { title: '字段名 (FieldKey)', dataIndex: 'fieldKey', width: 300 },
+  // 中文名不设宽度，自动吃掉剩余空间（字段名收窄后这里会明显变宽）
+  { title: '中文名', dataIndex: 'label' },
+  // 180 才放得下 VARCHAR(255) 全称，132 会把下拉显示成 VARCHAR(...)
+  { title: '类型', dataIndex: 'type', width: 180 },
   { title: '启用', dataIndex: 'enabled', width: 62, align: 'center' },
   { title: '操作', dataIndex: 'action', width: 150, align: 'center' }
 ]
@@ -4873,7 +5039,7 @@ defineExpose({ open })
 
 .map-row {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 40px 1.4fr 1fr 110px;
+  grid-template-columns: 1.4fr 1fr 40px 1.4fr 1fr 56px 110px;
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
@@ -4897,6 +5063,26 @@ defineExpose({ open })
   font-family: Consolas, Monaco, monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 主键列：有钥匙才显示，其余留占位，保证各行对齐 */
+.map-pk-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.map-pk-head {
+  text-align: center;
+}
+
+.map-na {
+  color: #d9d9d9;
+}
+
+.map-pk {
+  font-size: 13px;
+  color: #d48806;
 }
 
 .map-name {
@@ -4933,50 +5119,231 @@ defineExpose({ open })
   color: #cf1322;
 }
 
-.schema-section {
-  margin-bottom: 16px;
+/* ===== 目标表结构变更弹窗：左右对照单表 ===== */
+.sch-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #8c8c8c;
 }
 
-.schema-title {
-  margin-bottom: 8px;
-  font-size: 13px;
+.sch-summary b {
   font-weight: 600;
   color: #262626;
 }
 
-.schema-empty {
+.sch-summary .is-warn b {
+  color: #d46b08;
+}
+
+.sch-summary .is-new b {
+  color: #237804;
+}
+
+.sch-summary .is-extra b {
+  color: #cf1322;
+}
+
+.sch-summary .is-pk b {
+  color: #185fa5;
+}
+
+.sch-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sch-search {
+  width: 200px;
+}
+
+.sch-sort {
+  width: 118px;
+}
+
+.sch-toolbar-tip {
   font-size: 12px;
   color: #bfbfbf;
 }
 
-.schema-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
+/* 唯一滚动区：弹窗高度就此封顶，不再随字段数线性增长 */
+.sch-scroll {
+  max-height: min(52vh, 460px);
+  overflow: auto;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
 }
 
-.schema-name {
-  width: 240px;
-  overflow: hidden;
-  font-family: Consolas, Monaco, monospace;
+.sch-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
   font-size: 12px;
-  text-overflow: ellipsis;
+}
+
+.sch-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 7px 6px;
+  background: #fafafa;
+  border-bottom: 1px solid #f0f0f0;
+  font-weight: 600;
+  color: #8c8c8c;
+  text-align: left;
   white-space: nowrap;
 }
 
-/* 类型变更行：当前类型 → 目标类型 */
-.schema-type-old {
-  width: 130px;
-  color: #8c8c8c;
-  font-family: Consolas, Monaco, monospace;
-  font-size: 12px;
-  text-align: right;
+.sch-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #f5f5f5;
+  vertical-align: middle;
 }
 
-.schema-arrow {
-  color: #bfbfbf;
+.sch-table .c-check {
+  width: 36px;
+  padding-left: 10px;
+}
+
+.sch-table .c-act {
+  width: 40px;
+}
+
+.sch-table .c-type {
+  width: 104px;
+}
+
+.sch-table .c-arrow {
+  width: 26px;
+  text-align: center;
+}
+
+.sch-table .c-ttype {
+  width: 158px;
+}
+
+.sch-table .c-pk {
+  width: 46px;
+  text-align: center;
+}
+
+.sch-table .c-status {
+  width: 92px;
+}
+
+.sch-row:hover td {
+  background: #fafafa;
+}
+
+.sch-row.is-type_diff td {
+  background: #fffdf5;
+}
+
+.sch-row.is-missing_in_source td {
+  background: #fff8f8;
+}
+
+.sch-mono {
+  font-family: Consolas, Monaco, monospace;
+}
+
+.sch-na {
+  color: #d9d9d9;
+}
+
+.sch-act {
   font-size: 12px;
+  color: #bfbfbf;
+}
+
+.sch-act.is-type_diff {
+  color: #d46b08;
+}
+
+.sch-act.is-missing_in_target {
+  color: #237804;
+}
+
+.sch-act.is-missing_in_source {
+  color: #cf1322;
+}
+
+.sch-pending {
+  color: #bfbfbf;
+  font-style: italic;
+}
+
+.sch-type-ro {
+  color: #8c8c8c;
+}
+
+.sch-type-select {
+  width: 100%;
+}
+
+.sch-arrow {
+  color: #bfbfbf;
+}
+
+.sch-arrow.is-new {
+  color: #237804;
+}
+
+.sch-arrow.is-extra {
+  color: #cf1322;
+}
+
+.sch-pk {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #d9d9d9;
+  cursor: pointer;
+}
+
+.sch-pk:hover:enabled {
+  background: #f0f5ff;
+  color: #185fa5;
+}
+
+.sch-pk.is-on {
+  background: #e6f1fb;
+  border-color: #b5d4f4;
+  color: #185fa5;
+}
+
+.sch-pk:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sch-empty {
+  padding: 24px;
+  font-size: 12px;
+  text-align: center;
+  color: #bfbfbf;
+}
+
+.sch-plan {
+  padding: 8px 0;
+  font-size: 12px;
+  color: #595959;
 }
 
 .filt-row {
