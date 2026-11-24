@@ -83,7 +83,7 @@ public class EtlPipeline extends BaseTenantEntity {
     // 两种模式都改为读取目标表真实主键，不再从流程配置里取。
     // 库中的 t_etl_pipeline.upsert_keys 列保留（可空），仅为不破坏历史数据。
 
-    /** 增量同步配置 JSON（范围字段 / 窗口天数 / 软删除列 / 删除比例上限） */
+    /** 增量同步配置 JSON（范围字段 / 范围起点 / 范围终点 / 软删除列 / 删除比例上限） */
     private String syncConfig;
 
     /** 抽取字段清单元数据 JSON（中文名/类型/启用；字段名与顺序以 apiBody.FieldKeys 为准） */

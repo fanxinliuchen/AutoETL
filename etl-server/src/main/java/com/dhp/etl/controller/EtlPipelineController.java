@@ -6,12 +6,16 @@ import com.dhp.common.result.R;
 import com.dhp.etl.core.extractor.KingdeeMetadataClient;
 import com.dhp.etl.core.extractor.KingdeeReportClient;
 import com.dhp.etl.core.extractor.RequestVarResolver;
+import com.dhp.etl.core.extractor.SourceColumnResolver;
 import com.dhp.etl.core.extractor.WebApiExtractor;
 import com.dhp.etl.core.guard.SqlSafetyGuard;
 import com.dhp.etl.core.loop.LoopDatasetService;
+import com.dhp.etl.dto.KingdeeFieldVerifyDTO;
 import com.dhp.etl.dto.KingdeeFormFieldQueryDTO;
 import com.dhp.etl.dto.KingdeeReportFieldQueryDTO;
 import com.dhp.etl.dto.LoopEvalDTO;
+import com.dhp.etl.dto.SourceColumnQueryDTO;
+import com.dhp.etl.dto.SourceColumnResultDTO;
 import com.dhp.etl.dto.SqlValidateDTO;
 import com.dhp.etl.dto.VarEvalDTO;
 import com.dhp.etl.entity.EtlPipeline;
@@ -40,6 +44,7 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
     private final KingdeeReportClient kingdeeReportClient;
     private final RequestVarResolver requestVarResolver;
     private final LoopDatasetService loopDatasetService;
+    private final SourceColumnResolver sourceColumnResolver;
 
     @Override
     protected IBaseCrudService<EtlPipeline> getService() {
@@ -109,6 +114,12 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
         return R.ok("SQL 校验通过，语法与安全规则符合要求");
     }
 
+    @Operation(summary = "解析 MySQL 抽取 SQL 的输出字段（执行 LIMIT 1 取元数据与样例）")
+    @PostMapping("/mysql/columns")
+    public R<SourceColumnResultDTO> describeSourceColumns(@RequestBody @Valid SourceColumnQueryDTO dto) {
+        return R.ok(sourceColumnResolver.resolve(dto));
+    }
+
     @Operation(summary = "WebAPI 前置登录测试")
     @PostMapping("/webapi/test-login")
     public R<Map<String, Object>> testWebapiLogin(@RequestBody Map<String, String> params) {
@@ -132,6 +143,12 @@ public class EtlPipelineController extends BaseCrudController<EtlPipeline> {
     public R<Map<String, Object>> detectKingdeeFormType(
             @RequestBody @Valid KingdeeFormFieldQueryDTO dto) {
         return R.ok(kingdeeMetadataClient.detectFormType(dto));
+    }
+
+    @Operation(summary = "按 ExecuteBillQuery 实测字段是否被金蝶接受（元数据不含全部可查字段）")
+    @PostMapping("/webapi/verify-field-keys")
+    public R<Map<String, Object>> verifyFieldKeys(@RequestBody @Valid KingdeeFieldVerifyDTO dto) {
+        return R.ok(kingdeeMetadataClient.verifyFieldKeys(dto));
     }
 
     @Operation(summary = "从金蝶报表试取 1 行推断字段（报表方案）")

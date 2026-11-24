@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -260,5 +261,68 @@ class KingdeeMetadataClientTest {
         BizException ex = assertThrows(BizException.class,
                 () -> client.detectTypeFromBody(json, "STK_XXX"));
         assertTrue(ex.getMessage().contains("STK_XXX 不存在"), ex.getMessage());
+    }
+
+    // ===== 类型推断：COUNTRY 里含 COUNT 的坑 =====
+
+    @Test
+    @DisplayName("FRECEIVERCOUNTRY / FCOUNTY 不能被当成数量列")
+    void inferTypeDoesNotTrapCountry() {
+        assertEquals("VARCHAR(255)", KingdeeMetadataClient.inferTypeByKey("FReceiverCountry"));
+        assertEquals("VARCHAR(255)", KingdeeMetadataClient.inferTypeByKey("FCOUNTY"));
+        assertEquals("INT", KingdeeMetadataClient.inferTypeByKey("FBillCount"));
+        assertEquals("INT", KingdeeMetadataClient.inferTypeByKey("FSeq"));
+    }
+
+    // ===== 字段存在性实测（ExecuteBillQuery）=====
+
+    @Test
+    @DisplayName("裸二维数组 = 查询成功，不算业务错误")
+    void noErrorOnBareArray() {
+        assertNull(client.extractBusinessError("[[1, \"FBillNo\"]]"));
+        assertNull(client.extractBusinessError("[]"));
+    }
+
+    @Test
+    @DisplayName("Result.ResponseStatus.IsSuccess=false 时取出错误原文")
+    void errorFromResponseStatus() {
+        String body = """
+                {
+                  "Result": {
+                    "ResponseStatus": {
+                      "IsSuccess": false,
+                      "Errors": [ { "Message": "元数据中标识为FCustMatlId的字段不存在" } ]
+                    }
+                  }
+                }
+                """;
+        assertEquals("元数据中标识为FCustMatlId的字段不存在", client.extractBusinessError(body));
+    }
+
+    @Test
+    @DisplayName("错误对象藏在数据格里时也要能捞出来")
+    void errorInsideDataCell() {
+        String body = """
+                [[{"Result": {"ResponseStatus": {"IsSuccess": false, "Errors": [{"Message": "元数据中标识为FFoo的字段不存在"}]}}}]]
+                """;
+        assertEquals("元数据中标识为FFoo的字段不存在", client.extractBusinessError(body));
+    }
+
+    @Test
+    @DisplayName("空返回与非 JSON 返回都要给出可读错误")
+    void errorOnGarbage() {
+        assertEquals("金蝶返回为空", client.extractBusinessError(""));
+        assertTrue(client.extractBusinessError("<html>502</html>").contains("不是合法 JSON"));
+    }
+
+    @Test
+    @DisplayName("从报错里取出不存在的字段标识，兼容空格")
+    void parseMissingFieldName() {
+        assertEquals("FCustMatlId",
+                KingdeeMetadataClient.missingFieldName("金蝶返回业务错误: 元数据中标识为FCustMatlId的字段不存在"));
+        assertEquals("F_whh_OrderNumber",
+                KingdeeMetadataClient.missingFieldName("元数据中标识为 F_whh_OrderNumber 的字段不存在"));
+        assertNull(KingdeeMetadataClient.missingFieldName("金蝶服务暂不可用"));
+        assertNull(KingdeeMetadataClient.missingFieldName(null));
     }
 }

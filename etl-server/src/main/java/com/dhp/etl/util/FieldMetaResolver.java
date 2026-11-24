@@ -4,9 +4,13 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONArray;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import com.dhp.common.exception.BizException;
+import com.dhp.common.result.ErrorCode;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -37,27 +41,98 @@ public final class FieldMetaResolver {
             return result;
         }
         try {
-            JSONObject root = JSONUtil.parseObj(fieldMetaJson);
-            JSONArray fields = root.getJSONArray("fields");
-            if (fields == null) {
-                return result;
-            }
-            for (int i = 0; i < fields.size(); i++) {
-                JSONObject field = fields.getJSONObject(i);
-                if (field == null) {
-                    continue;
-                }
-                String key = StrUtil.trimToEmpty(field.getStr("k"));
-                if (StrUtil.isBlank(key)) {
-                    continue;
-                }
-                if (Boolean.FALSE.equals(field.getBool("enabled", Boolean.TRUE))) {
-                    continue;
-                }
-                result.put(key, normalizeType(field.getStr("type")));
+            Map<String, JSONObject> byKey = enabledFieldMap(fieldMetaJson);
+            List<String> keys = new ArrayList<>(byKey.keySet());
+            Map<String, String> columnByKey = columnMapping(fieldMetaJson, keys);
+            for (String key : keys) {
+                result.put(columnByKey.getOrDefault(key, ColumnNaming.toColumn(key)),
+                        normalizeType(byKey.get(key).getStr("type")));
             }
         } catch (Exception e) {
             log.warn("field_meta 解析失败，临时表将全部按 VARCHAR(255) 建表: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    /**
+     * 字段清单里启用的字段标识（顺序即列序）。
+     *
+     * <p>云表/自定义报文没有 FieldKeys，只能以这份清单为准。
+     */
+    public static List<String> enabledKeys(String fieldMetaJson) {
+        try {
+            return new ArrayList<>(enabledFieldMap(fieldMetaJson).keySet());
+        } catch (Exception e) {
+            log.warn("field_meta 解析失败，字段清单按空处理: {}", e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    /** 启用字段：key -> 字段对象（保持配置顺序） */
+    private static Map<String, JSONObject> enabledFieldMap(String fieldMetaJson) {
+        Map<String, JSONObject> map = new LinkedHashMap<>();
+        if (StrUtil.isBlank(fieldMetaJson)) {
+            return map;
+        }
+        JSONObject root = JSONUtil.parseObj(fieldMetaJson);
+        JSONArray fields = root.getJSONArray("fields");
+        if (fields == null) {
+            return map;
+        }
+        for (int i = 0; i < fields.size(); i++) {
+            JSONObject field = fields.getJSONObject(i);
+            if (field == null) {
+                continue;
+            }
+            String key = StrUtil.trimToEmpty(field.getStr("k"));
+            if (StrUtil.isBlank(key)) {
+                continue;
+            }
+            if (Boolean.FALSE.equals(field.getBool("enabled", Boolean.TRUE))) {
+                continue;
+            }
+            map.putIfAbsent(key, field);
+        }
+        return map;
+    }
+
+    /** 列名白名单：允许中文/字母开头，只含中文/字母/数字/下划线（MySQL 8 + utf8mb4 原生支持中文列名） */
+    private static final Pattern COLUMN_PATTERN = Pattern.compile("^[\\p{L}_][\\p{L}\\p{N}_]{0,63}$");
+
+    /**
+     * 字段标识 -> 落库列名。
+     *
+     * <p>优先级：field_meta 里手工指定的 {@code column} > 按标识换算（{@link ColumnNaming}）。
+     * 云表的数据项名基本是中文，手工列名是必需的逃生门。
+     */
+    public static Map<String, String> columnMapping(String fieldMetaJson, List<String> fieldKeys) {
+        Map<String, String> overrides = new LinkedHashMap<>();
+        if (StrUtil.isNotBlank(fieldMetaJson)) {
+            try {
+                for (Map.Entry<String, JSONObject> entry : enabledFieldMap(fieldMetaJson).entrySet()) {
+                    String column = StrUtil.trimToEmpty(entry.getValue().getStr("column"));
+                    if (StrUtil.isNotBlank(column)) {
+                        if (!COLUMN_PATTERN.matcher(column).matches()) {
+                            throw new BizException(ErrorCode.PARAM_ERROR,
+                                    "字段「" + entry.getKey() + "」的列名不合法：" + column
+                                            + "（只允许中文/字母/数字/下划线，且不以数字开头）");
+                        }
+                        overrides.put(entry.getKey(), column);
+                    }
+                }
+            } catch (BizException be) {
+                throw be;
+            } catch (Exception e) {
+                log.warn("field_meta 列名解析失败，按字段标识换算: {}", e.getMessage());
+            }
+        }
+        Map<String, String> result = new LinkedHashMap<>();
+        if (fieldKeys == null) {
+            return result;
+        }
+        Map<String, String> base = ColumnNaming.mapping(fieldKeys);
+        for (String key : fieldKeys) {
+            result.put(key, overrides.getOrDefault(key, base.getOrDefault(key, ColumnNaming.toColumn(key))));
         }
         return result;
     }

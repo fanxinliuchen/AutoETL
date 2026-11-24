@@ -12,6 +12,8 @@ export interface FieldRow {
   type: string
   enabled: boolean
   remark: string
+  /** 落库列名（可中文）。留空按字段名换算——云表数据项基本是中文，有时要和数仓既有列名对齐 */
+  column?: string
 }
 
 export interface ParseResult {
@@ -34,8 +36,8 @@ export const FIELD_TYPE_OPTIONS = [
   'DATETIME'
 ]
 
-/** 金蝶字段标识：字母或下划线开头，允许字母/数字/下划线/点（如 FSupplierId.FNumber） */
-const FIELD_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.]*$/
+/** 字段标识：允许中文（云表数据项名）、字母、数字、下划线、点（如 FSupplierId.FNumber） */
+const FIELD_KEY_PATTERN = /^[\p{L}_][\p{L}\p{N}_.]*$/u
 
 const HEADERS = ['序号', '字段名', '中文名', '类型', '启用', '备注']
 
@@ -175,19 +177,23 @@ export function inferFieldType(fieldKey: string): string {
   ) {
     return 'DECIMAL(18,4)'
   }
-  if (leaf.includes('COUNT') || leaf.includes('SEQ')) return 'INT'
+  // 数量/序号用 endsWith：早期用 includes('COUNT') 会把 FRECEIVERCOUNTRY（收货国家）、
+  // FCOUNTY（区县）也判成 INT，而金蝶对这些空值返回 " "，落 INT 列直接报 Incorrect integer value
+  if (leaf.endsWith('COUNT') || leaf.includes('SEQ')) return 'INT'
   if (leaf.includes('STATUS') || leaf.includes('FLAG') || leaf.includes('ENABLE')) return 'VARCHAR(32)'
   return 'VARCHAR(255)'
 }
 
-/** 字段行 -> field_meta JSON（随流程持久化，供后端解析临时表列类型） */export function fieldRowsToMetaJson(rows: FieldRow[]): string {
+/** 字段行 -> field_meta JSON（随流程持久化，供后端解析临时表列名与类型） */export function fieldRowsToMetaJson(rows: FieldRow[]): string {
   return JSON.stringify({
     fields: rows.map((r) => ({
       k: r.fieldKey.trim(),
       label: r.label || '',
       type: r.type || 'VARCHAR(255)',
       enabled: !!r.enabled,
-      remark: r.remark || ''
+      remark: r.remark || '',
+      // 落库列名：留空由后端按字段名换算（云表中文数据项/数仓中文列名靠它对齐）
+      column: (r.column || '').trim()
     }))
   })
 }
@@ -224,8 +230,14 @@ export function fieldRowsFromMeta(metaJson: string | undefined, fieldKeys: strin
         fieldKey: key,
         label: String(f?.label ?? '').slice(0, 64),
         type: String(f?.type ?? 'VARCHAR(255)').toUpperCase() || 'VARCHAR(255)',
-        enabled: keySet.has(upper),
-        remark: String(f?.remark ?? '').slice(0, 128)
+        // 启用状态以 field_meta 里存的为准：导入的字段一律是启用的，
+        // 用报文 FieldKeys 反推会让「导入 52 个、只启用 20 个」（FieldKeys 只有 20 个）。
+        // 老数据没有 enabled 字段时才回退到 FieldKeys 判断
+        enabled: f?.enabled === undefined || f?.enabled === null
+          ? keySet.has(upper)
+          : !!f.enabled,
+        remark: String(f?.remark ?? '').slice(0, 128),
+        column: String(f?.column ?? '').slice(0, 64)
       })
     )
   })

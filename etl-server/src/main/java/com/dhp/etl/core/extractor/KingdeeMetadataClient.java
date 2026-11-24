@@ -8,6 +8,7 @@ import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.dhp.common.exception.BizException;
 import com.dhp.common.result.ErrorCode;
+import com.dhp.etl.dto.KingdeeFieldVerifyDTO;
 import com.dhp.etl.dto.KingdeeFormFieldQueryDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -18,6 +19,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 金蝶云星空表单元数据客户端。
@@ -198,6 +201,197 @@ public class KingdeeMetadataClient {
                     "金蝶登录失败: " + StrUtil.blankToDefault(String.valueOf(authResult.get("message")), "未知原因"));
         }
         return String.valueOf(authResult.getOrDefault("cookie", ""));
+    }
+
+    // ===== 字段存在性实测（ExecuteBillQuery）=====
+
+    /** 单据查询接口路径（由登录地址推导时使用） */
+    private static final String BILL_QUERY_PATH =
+            "/k3cloud/Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteBillQuery.common.kdsvc";
+
+    /** 金蝶报错原文：元数据中标识为 XXX 的字段不存在 */
+    private static final Pattern MISSING_FIELD_PATTERN =
+            Pattern.compile("标识为\\s*([A-Za-z0-9_.]+)\\s*的字段不存在");
+
+    /**
+     * 用真实的 {@code ExecuteBillQuery} 验证字段清单是否存在。
+     *
+     * <p>为什么要实测而不是只比元数据：{@code QueryBusinessInfo} 返回的字段不完整
+     * （实测 SAL_RETURNSTOCK 只有 249 个，但 FMaterialName / F_BGJ_BaseProperty_* 等字段
+     * 查询时能用却不在其中），只比元数据会把合法字段误判成「不存在」。
+     * 金蝶查询时会逐个指出不存在的字段，这里剔除后继续，直到全部通过或达到轮次上限。
+     *
+     * <p>只发 {@code Limit=1} 的探测请求，不取数据、不落库。
+     */
+    public Map<String, Object> verifyFieldKeys(KingdeeFieldVerifyDTO dto) {
+        List<String> keys = new ArrayList<>(StrUtil.splitTrim(dto.getFieldKeys(), ','));
+        keys.removeIf(StrUtil::isBlank);
+        if (keys.isEmpty()) {
+            throw new BizException(ErrorCode.PARAM_ERROR, "字段清单为空，没有可校验的字段");
+        }
+
+        String billQueryUrl = StrUtil.isNotBlank(dto.getBillQueryUrl())
+                ? dto.getBillQueryUrl().trim()
+                : buildBillQueryUrl(dto.getLoginUrl());
+        webApiExtractor.validateUrlSafety(billQueryUrl);
+
+        String cookie = login(toFormQueryDto(dto));
+        int maxRounds = dto.getMaxRounds() == null ? 20 : Math.min(Math.max(dto.getMaxRounds(), 1), 100);
+        int total = keys.size();
+
+        List<String> invalid = new ArrayList<>();
+        StringBuilder log = new StringBuilder();
+        boolean passed = false;
+
+        for (int round = 1; round <= maxRounds && !keys.isEmpty(); round++) {
+            String error = queryOnce(billQueryUrl, cookie, dto.getFormId(), keys);
+            if (error == null) {
+                passed = true;
+                break;
+            }
+            String missing = missingFieldName(error);
+            if (missing == null) {
+                throw new BizException(ErrorCode.ETL_EXECUTE_ERROR,
+                        "金蝶返回的错误与字段名无关，无法继续判定: " + error);
+            }
+            invalid.add(missing);
+            log.append(String.format("[实测] 第 %d 轮：金蝶不认 %s，剔除后重试\n", round, missing));
+            keys.removeIf(k -> k.equalsIgnoreCase(missing));
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("total", total);
+        result.put("passed", passed);
+        result.put("invalid", invalid);
+        result.put("remaining", keys.size());
+        result.put("log", log.toString());
+        if (!passed && !keys.isEmpty()) {
+            result.put("note", "达到探测轮次上限（" + maxRounds + "），可能仍有未发现的字段");
+        }
+        return result;
+    }
+
+    /**
+     * 发一次 {@code Limit=1} 的查询：成功返回 null，失败返回金蝶的业务错误原文
+     */
+    private String queryOnce(String url, String cookie, String formId, List<String> keys) {
+        JSONObject payload = new JSONObject().set("data", new JSONObject()
+                .set("FormId", formId)
+                .set("FieldKeys", String.join(",", keys))
+                .set("Limit", 1)
+                .set("StartRow", 0));
+
+        try (HttpResponse response = HttpRequest.post(url)
+                .header("Content-Type", "application/json")
+                .header("Cookie", StrUtil.nullToEmpty(cookie))
+                .body(payload.toString())
+                .timeout(30000)
+                .execute()) {
+            if (!response.isOk()) {
+                throw new BizException(ErrorCode.ETL_EXECUTE_ERROR,
+                        "字段实测请求失败，HTTP 状态码: " + response.getStatus());
+            }
+            return extractBusinessError(response.body());
+        } catch (BizException be) {
+            throw be;
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.ETL_EXECUTE_ERROR, "字段实测请求异常: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 从金蝶报错里取「不存在」的字段标识；不是这类错误时返回 null
+     */
+    static String missingFieldName(String error) {
+        if (StrUtil.isBlank(error)) {
+            return null;
+        }
+        Matcher matcher = MISSING_FIELD_PATTERN.matcher(error);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+
+    /**
+     * 从查询返回里取业务错误：成功时是裸二维数组，失败时是 {@code Result.ResponseStatus}
+     * （个别版本会把错误对象塞进数据格里）
+     */
+    String extractBusinessError(String body) {
+        if (StrUtil.isBlank(body)) {
+            return "金蝶返回为空";
+        }
+        String trimmed = body.trim();
+        try {
+            if (trimmed.startsWith("[")) {
+                JSONArray rows = JSONUtil.parseArray(trimmed);
+                for (Object row : rows) {
+                    if (row instanceof JSONArray cells) {
+                        for (Object cell : cells) {
+                            if (cell instanceof JSONObject obj) {
+                                String error = errorFromResult(obj);
+                                if (error != null) {
+                                    return error;
+                                }
+                            }
+                        }
+                    } else if (row instanceof JSONObject obj) {
+                        String error = errorFromResult(obj);
+                        if (error != null) {
+                            return error;
+                        }
+                    }
+                }
+                // 裸数组且没有错误对象 = 查询成功
+                return null;
+            }
+            if (trimmed.startsWith("{")) {
+                String error = errorFromResult(JSONUtil.parseObj(trimmed));
+                return error != null ? error : "金蝶返回无法识别: " + StrUtil.brief(trimmed, 160);
+            }
+        } catch (Exception e) {
+            return "金蝶返回不是合法 JSON: " + StrUtil.brief(trimmed, 120);
+        }
+        return "金蝶返回不是合法 JSON（可能被网关拦截）: " + StrUtil.brief(trimmed, 120);
+    }
+
+    /** 节点里有 Result.ResponseStatus 且 IsSuccess=false 时返回错误详情 */
+    private String errorFromResult(JSONObject root) {
+        JSONObject status = safeObj(safeObj(root, "Result"), "ResponseStatus");
+        if (status == null || !Boolean.FALSE.equals(status.getBool("IsSuccess"))) {
+            return null;
+        }
+        JSONArray errors = status.getJSONArray("Errors");
+        if (errors != null && !errors.isEmpty()) {
+            Object first = errors.get(0);
+            if (first instanceof JSONObject obj && StrUtil.isNotBlank(obj.getStr("Message"))) {
+                return obj.getStr("Message");
+            }
+            if (first != null) {
+                return String.valueOf(first);
+            }
+        }
+        return "金蝶返回业务错误（无详情）";
+    }
+
+    private KingdeeFormFieldQueryDTO toFormQueryDto(KingdeeFieldVerifyDTO dto) {
+        KingdeeFormFieldQueryDTO query = new KingdeeFormFieldQueryDTO();
+        query.setLoginUrl(dto.getLoginUrl());
+        query.setAcctID(dto.getAcctID());
+        query.setUserName(dto.getUserName());
+        query.setPassword(dto.getPassword());
+        query.setLcid(dto.getLcid());
+        query.setFormId(dto.getFormId());
+        return query;
+    }
+
+    private String buildBillQueryUrl(String loginUrl) {
+        try {
+            URI uri = new URI(loginUrl);
+            if (StrUtil.isBlank(uri.getScheme()) || StrUtil.isBlank(uri.getAuthority())) {
+                throw new IllegalArgumentException("登录地址缺少协议或主机");
+            }
+            return uri.getScheme() + "://" + uri.getAuthority() + BILL_QUERY_PATH;
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.PARAM_ERROR, "无法由登录地址推导单据查询接口: " + e.getMessage());
+        }
     }
 
     private String buildMetadataUrl(String loginUrl) {
@@ -496,7 +690,9 @@ public class KingdeeMetadataClient {
                 || leaf.contains("WEIGHT") || leaf.contains("VOLUME") || leaf.contains("BALANCE")) {
             return "DECIMAL(18,4)";
         }
-        if (leaf.contains("COUNT") || leaf.contains("SEQ")) {
+        // 数量/序号用 endsWith：早期用 contains("COUNT") 会把 FRECEIVERCOUNTRY（收货国家）、
+        // FCOUNTY（区县）也判成 INT，而金蝶对这些空值返回 " "，落 INT 列直接报 Incorrect integer value
+        if (leaf.endsWith("COUNT") || leaf.contains("SEQ")) {
             return "INT";
         }
         if (leaf.contains("STATUS") || leaf.contains("FLAG") || leaf.contains("ENABLE")) {

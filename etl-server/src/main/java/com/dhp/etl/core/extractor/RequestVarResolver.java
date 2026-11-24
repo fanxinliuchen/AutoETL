@@ -50,8 +50,8 @@ public class RequestVarResolver {
     /** 变量名白名单：字母/下划线开头，仅含字母数字下划线 */
     private static final Pattern NAME_PATTERN = Pattern.compile("^[A-Za-z_][A-Za-z0-9_]{0,31}$");
 
-    /** 附加列列名白名单（会用于建表与 INSERT，禁止注入） */
-    private static final Pattern COLUMN_PATTERN = Pattern.compile("^[A-Za-z_][A-Za-z0-9_]{0,63}$");
+    /** 附加列列名白名单（会用于建表与 INSERT，禁止注入）；允许中文，与数仓既有中文列名对齐 */
+    private static final Pattern COLUMN_PATTERN = Pattern.compile("^[\\p{L}_][\\p{L}\\p{N}_]{0,63}$");
 
     /** 变量 SQL 的长度上限，防止有人往里塞整段脚本 */
     private static final int MAX_SQL_LENGTH = 1000;

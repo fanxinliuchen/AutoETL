@@ -46,6 +46,32 @@ export function validateSql(sql: string): Promise<string> {
   return request.post('/etl/pipeline/sql/validate', { sql })
 }
 
+export interface SourceColumnMeta {
+  name: string
+  type: string
+  jdbcType?: string
+  nullable?: boolean
+  sample?: string
+}
+
+export interface SourceColumnResult {
+  columns: SourceColumnMeta[]
+  warnings: string[]
+}
+
+/**
+ * 解析 MySQL 抽取 SQL 的输出字段。
+ * 后端会执行一次 `SELECT * FROM (sql) t LIMIT 1`：元数据取列名/类型，首行样例用于修正类型。
+ * 传 pipelineId 才能解析流程里定义的自定义变量。
+ */
+export function describeSourceColumns(data: {
+  datasourceId: string | number
+  sql: string
+  pipelineId?: string
+}): Promise<SourceColumnResult> {
+  return request.post('/etl/pipeline/mysql/columns', data)
+}
+
 export function testWebapiLogin(data: { authType: string; authConfig: string }): Promise<any> {
   return request.post('/etl/pipeline/webapi/test-login', data)
 }
@@ -74,6 +100,30 @@ export interface KingdeeFormQueryParams {
 export function queryKingdeeFormFields(data: KingdeeFormQueryParams): Promise<KingdeeFieldMeta[]> {
   // 失败原因在「从金蝶拉取字段」弹窗内就地展示，这里不再弹全局提示
   return request.post('/etl/pipeline/webapi/form-fields', data, { silent: true })
+}
+
+/** 字段存在性实测：元数据不含全部可查字段，只能让金蝶真查一次逐个点名 */
+export interface FieldVerifyResult {
+  total: number
+  /** 剔除不存在的字段后是否查询成功 */
+  passed: boolean
+  /** 金蝶明确不认的字段 */
+  invalid: string[]
+  remaining: number
+  log: string
+  note?: string
+}
+
+export interface FieldVerifyParams extends KingdeeFormQueryParams {
+  /** 单据查询接口地址（ExecuteBillQuery）；留空由登录地址推导 */
+  billQueryUrl?: string
+  /** 待校验字段，逗号分隔 */
+  fieldKeys: string
+  maxRounds?: number
+}
+
+export function verifyKingdeeFieldKeys(data: FieldVerifyParams): Promise<FieldVerifyResult> {
+  return request.post('/etl/pipeline/webapi/verify-field-keys', data, { silent: true })
 }
 
 /** 表单类型识别结果：BILL=单据（标准查询），REPORT=报表（parameters 方案） */

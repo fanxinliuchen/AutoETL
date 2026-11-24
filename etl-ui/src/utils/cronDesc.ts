@@ -159,6 +159,16 @@ function describeClock(hour: string, minute: string, second: string): string {
   return ''
 }
 
+/** 1-7 -> 第一个；8-14 -> 第二个；15-21 -> 第三个；22-28 -> 第四个 */
+function nthWeekOfMonth(field: string): string | null {
+  const range = rangeOf(field)
+  if (!range) return null
+  const starts = [1, 8, 15, 22]
+  const names = ['第一个', '第二个', '第三个', '第四个']
+  const index = starts.indexOf(range[0])
+  return index >= 0 && range[1] === range[0] + 6 ? names[index] : null
+}
+
 /**
  * 把 Spring / Quartz 风格 cron 表达式翻成中文，识别不了返回空串。
  * 例：0 0 8 * * ? -> 每天早上8点
@@ -178,8 +188,13 @@ export function describeCron(expr?: string | null): string {
   const domAny = isAny(dom)
   const dowAny = isAny(dow)
 
-  // 日与周同时限定，组合含义太灵活，不猜
-  if (!domAny && !dowAny) return ''
+  // 日与周同时限定：只认「每月第 n 个周 X」这种收敛写法（1-7 * FRI），其余组合太灵活，不猜
+  if (!domAny && !dowAny) {
+    const week = describeWeek(dow)
+    const nth = nthWeekOfMonth(dom)
+    const clock = describeClock(hour, minute, second)
+    return week && nth && clock ? `每月${nth}${week}${clock}` : ''
+  }
 
   // 按周：每周一凌晨1点 / 每周一至周五上午9点
   if (!dowAny) {

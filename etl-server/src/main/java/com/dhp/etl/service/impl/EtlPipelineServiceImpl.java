@@ -8,12 +8,16 @@ import com.dhp.common.base.BaseCrudServiceImpl;
 import com.dhp.common.exception.BizException;
 import com.dhp.common.result.ErrorCode;
 import com.dhp.etl.core.PipelineExecutor;
+import com.dhp.etl.core.guard.PostgresSqlGuard;
 import com.dhp.etl.core.guard.SqlSafetyGuard;
 import com.dhp.etl.core.schedule.DynamicCronScheduler;
+import com.dhp.etl.entity.EtlDatasource;
 import com.dhp.etl.entity.EtlPipeline;
+import com.dhp.etl.enums.ConnTypeEnum;
 import com.dhp.etl.enums.SourceTypeEnum;
 import com.dhp.etl.enums.TriggerTypeEnum;
 import com.dhp.etl.mapper.EtlPipelineMapper;
+import com.dhp.etl.service.EtlDatasourceService;
 import com.dhp.etl.service.EtlPipelineService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.BeanUtils;
@@ -29,6 +33,8 @@ import java.util.concurrent.CompletableFuture;
 public class EtlPipelineServiceImpl extends BaseCrudServiceImpl<EtlPipelineMapper, EtlPipeline> implements EtlPipelineService {
 
     private final SqlSafetyGuard sqlSafetyGuard;
+    private final PostgresSqlGuard postgresSqlGuard;
+    private final EtlDatasourceService datasourceService;
     private final DynamicCronScheduler scheduler;
     private final PipelineExecutor pipelineExecutor;
 
@@ -117,8 +123,10 @@ public class EtlPipelineServiceImpl extends BaseCrudServiceImpl<EtlPipelineMappe
         this.updateById(pipeline);
 
         if (status == 1) {
-            if (pipeline.getTargetDsId() == null || StrUtil.isBlank(pipeline.getTargetTable()) || StrUtil.isBlank(pipeline.getTransformSql())) {
-                throw new BizException(ErrorCode.PARAM_ERROR, "流程配置尚未完善（缺少目标数仓连接或转换SQL），无法启用定时调度");
+            // 转换 SQL 允许留空（留空即按目标表结构自动生成入库脚本），
+            // 这里只校验与 PipelineExecutor 一致的前置条件，别把能跑的流程挡在门外
+            if (pipeline.getTargetDsId() == null || StrUtil.isBlank(pipeline.getTargetTable())) {
+                throw new BizException(ErrorCode.PARAM_ERROR, "流程配置尚未完善（缺少目标数仓连接或目标表），无法启用定时调度");
             }
             validateCron(pipeline);
             scheduler.registerTask(pipeline.getId(), pipeline.getCronExpr());
@@ -225,12 +233,25 @@ public class EtlPipelineServiceImpl extends BaseCrudServiceImpl<EtlPipelineMappe
         }
     }
 
+    private boolean isPostgresSource(EtlPipeline pipeline) {
+        if (pipeline.getSourceDsId() == null) {
+            return false;
+        }
+        EtlDatasource ds = datasourceService.getById(pipeline.getSourceDsId());
+        return ds != null && ConnTypeEnum.of(ds.getConnType()) == ConnTypeEnum.POSTGRESQL;
+    }
+
     private void validateSqls(EtlPipeline pipeline) {
         if (StrUtil.isNotBlank(pipeline.getTransformSql())) {
             sqlSafetyGuard.validate(pipeline.getTransformSql());
         }
         if (pipeline.getSourceType() == SourceTypeEnum.MYSQL && StrUtil.isNotBlank(pipeline.getSourceQuerySql())) {
-            sqlSafetyGuard.validate(pipeline.getSourceQuerySql());
+            // 源 SQL 按连接方言校验：PG 语法（:: / ILIKE / ON CONFLICT）过不了 JSqlParser
+            if (isPostgresSource(pipeline)) {
+                postgresSqlGuard.validateShape(pipeline.getSourceQuerySql());
+            } else {
+                sqlSafetyGuard.validate(pipeline.getSourceQuerySql());
+            }
         }
     }
 

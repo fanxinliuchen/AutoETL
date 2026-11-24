@@ -13,6 +13,7 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.Statement;
 import java.util.*;
 import java.util.regex.Pattern;
@@ -32,7 +33,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class TargetTableSchemaService {
 
-    private static final Pattern IDENT = Pattern.compile("^[A-Za-z_][A-Za-z0-9_]{0,63}$");
+    /** 标识符白名单：允许中文（数仓里已有中文列名），仍禁反引号/分号/空白，避免拼接注入 */
+    private static final Pattern IDENT = Pattern.compile("^[\\p{L}_][\\p{L}\\p{N}_]{0,63}$");
 
     private final EtlDatasourceService datasourceService;
 
@@ -108,6 +110,49 @@ public class TargetTableSchemaService {
         } catch (Exception e) {
             throw new BizException(ErrorCode.ETL_DATASOURCE_CONNECT_FAIL,
                     "读取表结构失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 只读预览目标表数据（最多 limit 行），用于核对落库结果。
+     *
+     * <p>列名原样返回（含中文列名），值按 JDBC 原始类型返回，不做任何改写。
+     */
+    public Map<String, Object> preview(Long datasourceId, String table, int limit) {
+        String tableName = validateTable(table);
+        int rows = Math.min(Math.max(limit, 1), 200);
+        DataSource ds = datasourceService.getDataSource(datasourceId);
+        try (Connection conn = ds.getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT * FROM " + quote(tableName) + " LIMIT " + rows)) {
+            ResultSetMetaData meta = rs.getMetaData();
+            List<String> columns = new ArrayList<>();
+            for (int i = 1; i <= meta.getColumnCount(); i++) {
+                columns.add(meta.getColumnLabel(i));
+            }
+            List<Map<String, Object>> data = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (String column : columns) {
+                    row.put(column, rs.getObject(column));
+                }
+                data.add(row);
+            }
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("table", tableName);
+            result.put("columns", columns);
+            result.put("rows", data);
+            result.put("total", countRows(conn, tableName));
+            return result;
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.ETL_EXECUTE_ERROR, "预览目标表失败: " + e.getMessage());
+        }
+    }
+
+    private long countRows(Connection conn, String tableName) throws Exception {
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM " + quote(tableName))) {
+            return rs.next() ? rs.getLong(1) : 0L;
         }
     }
 

@@ -6,17 +6,20 @@ import cn.hutool.core.util.StrUtil;
 import com.dhp.common.exception.BizException;
 import com.dhp.common.result.ErrorCode;
 import com.dhp.etl.core.alert.AlertService;
-import com.dhp.etl.core.extractor.MySqlExtractor;
+import com.dhp.etl.core.extractor.JdbcExtractor;
 import com.dhp.etl.core.extractor.RequestVarResolver;
 import com.dhp.etl.core.extractor.WebApiExtractor;
+import com.dhp.etl.core.guard.PostgresSqlGuard;
 import com.dhp.etl.core.guard.SqlSafetyGuard;
 import com.dhp.etl.core.loader.MySqlDwLoader;
 import com.dhp.etl.core.loop.LoopConfig;
 import com.dhp.etl.core.loop.LoopDatasetService;
 import com.dhp.etl.core.transformer.AutoInsertSqlBuilder;
 import com.dhp.etl.core.transformer.SqlTransformExecutor;
+import com.dhp.etl.entity.EtlDatasource;
 import com.dhp.etl.entity.EtlPipeline;
 import com.dhp.etl.entity.EtlTaskInstance;
+import com.dhp.etl.enums.ConnTypeEnum;
 import com.dhp.etl.enums.SourceTypeEnum;
 import com.dhp.etl.enums.TaskStatusEnum;
 import com.dhp.etl.enums.TriggerTypeEnum;
@@ -31,6 +34,7 @@ import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.Collections;
 import java.util.List;
@@ -48,7 +52,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public class PipelineExecutor {
 
-    private final MySqlExtractor mySqlExtractor;
+    private final JdbcExtractor jdbcExtractor;
     private final WebApiExtractor webApiExtractor;
     private final SqlTransformExecutor sqlTransformExecutor;
     private final AutoInsertSqlBuilder autoInsertSqlBuilder;
@@ -56,6 +60,7 @@ public class PipelineExecutor {
     private final RequestVarResolver requestVarResolver;
     private final MySqlDwLoader mySqlDwLoader;
     private final SqlSafetyGuard sqlSafetyGuard;
+    private final PostgresSqlGuard postgresSqlGuard;
     private final AlertService alertService;
     private final EtlDatasourceService datasourceService;
     private final EtlTaskInstanceService instanceService;
@@ -63,7 +68,7 @@ public class PipelineExecutor {
 
     private final ConcurrentHashMap<Long, Future<?>> runningTasks = new ConcurrentHashMap<>();
 
-    public PipelineExecutor(MySqlExtractor mySqlExtractor,
+    public PipelineExecutor(JdbcExtractor jdbcExtractor,
                             WebApiExtractor webApiExtractor,
                             SqlTransformExecutor sqlTransformExecutor,
                             AutoInsertSqlBuilder autoInsertSqlBuilder,
@@ -71,11 +76,12 @@ public class PipelineExecutor {
                             RequestVarResolver requestVarResolver,
                             MySqlDwLoader mySqlDwLoader,
                             SqlSafetyGuard sqlSafetyGuard,
+                            PostgresSqlGuard postgresSqlGuard,
                             AlertService alertService,
                             EtlDatasourceService datasourceService,
                             EtlTaskInstanceService instanceService,
                             @Lazy EtlPipelineService pipelineService) {
-        this.mySqlExtractor = mySqlExtractor;
+        this.jdbcExtractor = jdbcExtractor;
         this.webApiExtractor = webApiExtractor;
         this.sqlTransformExecutor = sqlTransformExecutor;
         this.autoInsertSqlBuilder = autoInsertSqlBuilder;
@@ -83,6 +89,7 @@ public class PipelineExecutor {
         this.requestVarResolver = requestVarResolver;
         this.mySqlDwLoader = mySqlDwLoader;
         this.sqlSafetyGuard = sqlSafetyGuard;
+        this.postgresSqlGuard = postgresSqlGuard;
         this.alertService = alertService;
         this.datasourceService = datasourceService;
         this.instanceService = instanceService;
@@ -155,7 +162,13 @@ public class PipelineExecutor {
                 sqlSafetyGuard.validate(pipeline.getTransformSql());
             }
             if (pipeline.getSourceType() == SourceTypeEnum.MYSQL && StrUtil.isNotBlank(pipeline.getSourceQuerySql())) {
-                sqlSafetyGuard.validate(pipeline.getSourceQuerySql());
+                // 转发 SQL 的目标端固定是 MySQL，仍走 AST 白名单；
+                // 源 SQL 按方言：PG 用文本规则 + 运行时 EXPLAIN，MySQL 维持 JSqlParser
+                if (sourceConnType(pipeline) == ConnTypeEnum.POSTGRESQL) {
+                    postgresSqlGuard.validateShape(pipeline.getSourceQuerySql());
+                } else {
+                    sqlSafetyGuard.validate(pipeline.getSourceQuerySql());
+                }
             }
             logBuffer.append("[校验] SQL 语法与白名单校验通过\n");
             if (autoTransform) {
@@ -266,6 +279,15 @@ public class PipelineExecutor {
      * @param loopVars 循环取数当前轮的参数（列名 -> 值），为空表示非循环
      * @return {读取行数, 写入行数}
      */
+    /** 源连接类型：没配源连接（历史数据）时按 MySQL 处理 */
+    private ConnTypeEnum sourceConnType(EtlPipeline pipeline) {
+        if (pipeline.getSourceDsId() == null) {
+            return ConnTypeEnum.MYSQL;
+        }
+        EtlDatasource ds = datasourceService.getById(pipeline.getSourceDsId());
+        return ds == null ? ConnTypeEnum.MYSQL : ConnTypeEnum.of(ds.getConnType());
+    }
+
     private long[] runOnce(EtlPipeline pipeline,
                            Long instanceId,
                            String stageTable,
@@ -285,13 +307,20 @@ public class PipelineExecutor {
         long readCount;
         if (pipeline.getSourceType() == SourceTypeEnum.MYSQL) {
             if (pipeline.getSourceDsId() == null || StrUtil.isBlank(pipeline.getSourceQuerySql())) {
-                throw new BizException(ErrorCode.PARAM_ERROR, "MySQL 源缺少数据源ID或抽取SQL");
+                throw new BizException(ErrorCode.PARAM_ERROR, "数据库源缺少数据源ID或抽取SQL");
             }
+            ConnTypeEnum srcConnType = sourceConnType(pipeline);
             DataSource srcDs = datasourceService.getDataSource(pipeline.getSourceDsId());
             // 源 SQL 同样支持变量：循环时每轮取不同的时间区间
             String sourceSql = requestVarResolver.resolve(pipeline, pipeline.getSourceQuerySql(), logBuffer, loopVars);
-            readCount = mySqlExtractor.extractInBatches(
+            if (srcConnType == ConnTypeEnum.POSTGRESQL) {
+                // 变量替换后再做 EXPLAIN：既校验方言语法，也校验表/列权限，且不返回数据
+                postgresSqlGuard.explain(srcDs, sourceSql);
+                logBuffer.append("[校验] PostgreSQL EXPLAIN 语法/权限预检通过\n");
+            }
+            readCount = jdbcExtractor.extractInBatches(
                     srcDs,
+                    srcConnType,
                     sourceSql,
                     (batch, buf) -> {
                         injectExtraColumns(batch, extraValues);
@@ -300,12 +329,19 @@ public class PipelineExecutor {
                     logBuffer
             );
         } else {
-            List<Map<String, Object>> apiRecords = webApiExtractor.extract(pipeline, logBuffer, loopVars);
-            readCount = apiRecords.size();
-            if (CollUtil.isNotEmpty(apiRecords)) {
-                injectExtraColumns(apiRecords, extraValues);
-                mySqlDwLoader.batchInsertToStage(pipeline.getTargetDsId(), stageTable, apiRecords, columnTypes, logBuffer);
-            }
+            // 边抽边写：每页解析完立即落临时表，内存占用从「整表」降到「一页」。
+            // 列集合在第一页确定后固定下来，后续页即使个别键缺失也按 NULL 落库，
+            // 避免每页重新推列导致临时表被判定为结构变更而重建。
+            List<String> stageColumns = new ArrayList<>();
+            readCount = webApiExtractor.extractStreaming(pipeline, logBuffer, loopVars, (pageRows, buf) -> {
+                // 顺序不能反：附加列先补进每行，再按首行确定固定列集合
+                injectExtraColumns(pageRows, extraValues);
+                if (stageColumns.isEmpty() && !pageRows.isEmpty()) {
+                    stageColumns.addAll(pageRows.get(0).keySet());
+                }
+                mySqlDwLoader.batchInsertToStage(pipeline.getTargetDsId(), stageTable, pageRows,
+                        columnTypes, stageColumns, buf);
+            });
         }
         logBuffer.append(String.format("[暂存] 数据已成功载入临时表 %s，行数: %d\n", stageTable, readCount));
 
@@ -315,16 +351,26 @@ public class PipelineExecutor {
             if (readCount == 0) {
                 logBuffer.append("[处理] 未配置转换 SQL 且本次抽取 0 行，跳过入库\n");
             } else {
-                String autoSql = autoInsertSqlBuilder.build(pipeline, stageTable, logBuffer);
+                // 增量同步：软删除要拿业务主键去临时表探针，先按这组列建索引，
+                // 否则 28 万目标行 × 29 万临时行的 NOT EXISTS 会退化成全表扫描
+                boolean syncMode = WriteModeEnum.SYNC.equals(pipeline.getWriteMode());
+                if (syncMode) {
+                    List<String> stageKeys = autoInsertSqlBuilder.stageKeyColumns(pipeline, stageTable);
+                    mySqlDwLoader.ensureStageIndex(pipeline.getTargetDsId(), stageTable, stageKeys, logBuffer);
+                }
+                String autoSql = autoInsertSqlBuilder.build(pipeline, stageTable, logBuffer, loopVars);
                 logBuffer.append("[处理] 自动生成的入库脚本:\n").append(autoSql).append("\n");
                 sqlSafetyGuard.validate(autoSql);
+                // SYNC 脚本固定两段：①软删除 ②合并；给这两段各打一条开始/完成日志
+                List<String> phases = syncMode ? List.of("软删除", "合并") : null;
                 affectedRows = sqlTransformExecutor.executeScript(
                         pipeline.getTargetDsId(),
                         pipeline,
                         stageTable,
                         instanceId,
                         autoSql,
-                        logBuffer
+                        logBuffer,
+                        phases
                 );
             }
         } else {

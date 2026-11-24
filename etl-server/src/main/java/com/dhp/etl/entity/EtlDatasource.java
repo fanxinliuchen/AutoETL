@@ -16,6 +16,9 @@ public class EtlDatasource extends BaseTenantEntity {
     /** 数据源名称 */
     private String dsName;
 
+    /** 连接类型: MYSQL / KINGDEE_K3 / IYUNBIAO（决定怎么连、怎么鉴权） */
+    private String connType;
+
     /** 类型: MYSQL / MYSQL_DW */
     private String dsType;
 
@@ -34,14 +37,17 @@ public class EtlDatasource extends BaseTenantEntity {
     /** 字符编码 */
     private String encoding;
 
-    /** JDBC 连接串 */
+    /** JDBC 连接串（仅 MYSQL） */
     private String jdbcUrl;
 
     /** 数据库账号 */
     private String username;
 
-    /** 加密密码 */
+    /** 加密密码（仅 MYSQL） */
     private String passwordCipher;
+
+    /** 非 MySQL 连接配置：AES 加密的 JSON（金蝶/云表各自的连接参数） */
+    private String configCipher;
 
     /** 连接池上限 */
     private Integer maxPoolSize;

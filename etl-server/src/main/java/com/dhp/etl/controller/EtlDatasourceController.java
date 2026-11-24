@@ -12,6 +12,8 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -28,10 +30,23 @@ public class EtlDatasourceController extends BaseCrudController<EtlDatasource> {
 
     private final EtlDatasourceService datasourceService;
     private final TargetTableSchemaService targetTableSchemaService;
+    private final com.dhp.etl.core.connector.ConnectionManager connectionManager;
 
     @Override
     protected IBaseCrudService<EtlDatasource> getService() {
         return datasourceService;
+    }
+
+    @Operation(summary = "读取连接配置：密码/AppKey 打码，其余原样回显")
+    @GetMapping("/{id}/config")
+    public R<Map<String, Object>> connectionConfig(@PathVariable Long id) {
+        return R.ok(connectionManager.maskedConfig(id));
+    }
+
+    @Operation(summary = "连接列表：含脱敏的连接目标与账号（地址在加密配置里，前端拿不到）")
+    @PostMapping("/connections")
+    public R<List<Map<String, Object>>> connections() {
+        return R.ok(datasourceService.list().stream().map(connectionManager::summary).toList());
     }
 
     @Operation(summary = "测试数据源连接连通性")
@@ -51,6 +66,12 @@ public class EtlDatasourceController extends BaseCrudController<EtlDatasource> {
     public R<List<TargetTableSchemaService.TableColumn>> tableColumns(
             @RequestBody @Valid TableSchemaQueryDTO dto) {
         return R.ok(targetTableSchemaService.describeTable(dto.getDatasourceId(), dto.getTable()));
+    }
+
+    @Operation(summary = "只读预览目标表数据（最多 200 行），用于核对落库结果")
+    @PostMapping("/table-preview")
+    public R<Map<String, Object>> previewTable(@RequestBody @Valid TableSchemaQueryDTO dto) {
+        return R.ok(targetTableSchemaService.preview(dto.getDatasourceId(), dto.getTable(), 20));
     }
 
     @Operation(summary = "按映射结果变更目标表结构（新建表 / 增删列 / 改列类型 / 设置主键）")

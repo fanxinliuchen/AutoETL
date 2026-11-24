@@ -30,6 +30,7 @@
             ref="folderTreeRef"
             @select="onFolderSelect"
             @select-pipeline="onPipelineNodeSelect"
+            @edit-pipeline="onPipelineNodeEdit"
           />
         </aside>
 
@@ -45,7 +46,7 @@
                     v-model:value="queryForm.keyword"
                     placeholder="输入名称或编码搜索..."
                     allow-clear
-                    @pressEnter="fetchPipelines"
+                    @pressEnter="onSearch"
                   />
                 </a-form-item>
                 <a-form-item label="数据源类型">
@@ -56,7 +57,7 @@
                 </a-form-item>
                 <a-form-item>
                   <a-space>
-                    <a-button type="primary" @click="fetchPipelines">
+                    <a-button type="primary" @click="onSearch">
                       <search-outlined /> 查询
                     </a-button>
                     <a-button @click="resetQuery">
@@ -70,7 +71,22 @@
             <!-- 操作条与表格 -->
             <div class="table-card">
               <div class="table-toolbar">
-                <span class="toolbar-title">业务流程</span>
+                <div class="toolbar-heading">
+                  <span class="toolbar-title">业务流程</span>
+                  <span v-if="currentFolderScope.name" class="toolbar-scope">
+                    · {{ currentFolderScope.name }}<template v-if="currentFolderScope.ids.length > 1">（含 {{ currentFolderScope.ids.length - 1 }} 个子目录）</template>
+                  </span>
+                  <!-- 左树单击流程叶子后的定位态：列表只显示这一条，关闭标签回到整个目录 -->
+                  <a-tag
+                    v-if="focusedPipeline"
+                    closable
+                    color="blue"
+                    style="margin-left: 8px; margin-right: 0"
+                    @close="clearPipelineFocus"
+                  >
+                    <node-index-outlined /> {{ focusedPipeline.name }}
+                  </a-tag>
+                </div>
                 <a-space>
                   <a-button @click="fetchPipelines">
                     <sync-outlined :spin="loading" /> 刷新列表
@@ -87,6 +103,7 @@
                 :loading="loading"
                 row-key="id"
                 :pagination="pagination"
+                :row-class-name="rowClassName"
                 @change="handleTableChange"
               >
                 <template #bodyCell="{ column, record }">
@@ -94,7 +111,13 @@
                   <template v-if="column.dataIndex === 'pipelineName'">
                     <div class="pipeline-name-cell">
                       <div style="display: flex; align-items: center; gap: 6px">
-                        <span class="p-name" @click="openEditPipeline(record)">{{ record.pipelineName }}</span>
+                        <span
+                          class="p-name"
+                          @click="selectPipeline(record)"
+                          @dblclick="openEditPipeline(record)"
+                        >
+                          {{ record.pipelineName }}
+                        </span>
                         <a-tag
                           v-if="!isPipelineRunnable(record)"
                           color="orange"
@@ -109,9 +132,7 @@
 
                   <!-- 源类型 -->
                   <template v-else-if="column.dataIndex === 'sourceType'">
-                    <a-tag :color="record.sourceType === 'MYSQL' ? 'blue' : 'green'">
-                      {{ record.sourceType === 'MYSQL' ? 'MySQL' : 'WebAPI' }}
-                    </a-tag>
+                    <a-tag :color="sourceTypeColor(record)">{{ sourceTypeLabel(record) }}</a-tag>
                   </template>
 
                   <!-- 目标表：上行表名（自动换行），下行目标数据源名称 -->
@@ -211,8 +232,9 @@
           <div v-show="currentView === 'editor'" class="view-panel">
             <PipelineEditor
               ref="pipelineEditorRef"
-              @back="currentView = 'list'"
+              @back="onEditorBack"
               @success="onEditorSuccess"
+              @saved="onEditorSaved"
             />
           </div>
         </main>
@@ -240,6 +262,7 @@ import {
   EditOutlined,
   CopyOutlined,
   FileTextOutlined,
+  NodeIndexOutlined,
   DeleteOutlined
 } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
@@ -269,10 +292,30 @@ const datasourceModalRef = ref()
 const alertModalRef = ref()
 
 const currentFolderId = ref<string>('')
+/** 选中目录及其全部子孙目录：一级目录要能看到下面所有子目录的流程 */
+const currentFolderScope = ref<{ ids: string[]; name: string }>({ ids: [], name: '' })
 const loading = ref(false)
 const pipelineList = ref<EtlPipeline[]>([])
+
+/** 当前选中的流程（单击行选中，双击进入编辑） */
+const selectedPipelineId = ref<string>()
+
+/**
+ * 左树单击流程叶子后的定位态：
+ * 列表按目录范围 + 该流程 id 精确过滤，只显示这一条，避免流程不在当前页时「点了没反应」。
+ */
+const focusedPipeline = ref<{ id: string; name: string } | null>(null)
+
+const selectPipeline = (record: EtlPipeline) => {
+  selectedPipelineId.value = String(record.id)
+}
+
+const rowClassName = (record: EtlPipeline) =>
+  selectedPipelineId.value === String(record.id) ? 'row-selected' : ''
 /** 数据源 id -> 名称，目标表列第二行展示用 */
 const datasourceNames = ref<Record<string, string>>({})
+/** 数据源 id -> 连接类型，用于把 PostgreSQL 源和 MySQL 源区分显示 */
+const datasourceTypes = ref<Record<string, string>>({})
 
 const queryForm = reactive({
   keyword: '',
@@ -297,8 +340,12 @@ const columns = [
   { title: '操作', dataIndex: 'action', width: 300, fixed: 'right' }
 ]
 
-const onFolderSelect = (folderId: string) => {
+const onFolderSelect = (folderId: string, scope?: { ids: string[]; name: string }) => {
+  currentView.value = 'list'
   currentFolderId.value = folderId
+  currentFolderScope.value = scope || { ids: folderId ? [folderId] : [], name: '' }
+  // 选目录 = 看整个目录，退出「定位单条流程」状态
+  focusedPipeline.value = null
   pagination.current = 1
   fetchPipelines()
 }
@@ -307,14 +354,23 @@ const fetchPipelines = async () => {
   loading.value = true
   try {
     const filters: any[] = []
-    if (currentFolderId.value) {
-      filters.push({ fieldName: 'folderId', condition: 'eq', value: currentFolderId.value })
+    // 选目录时按「本目录 + 全部子孙目录」过滤，一级目录能带出所有子目录的流程
+    if (currentFolderScope.value.ids.length) {
+      filters.push({
+        fieldName: 'folderId',
+        condition: 'in',
+        value: currentFolderScope.value.ids.join(',')
+      })
     }
     if (queryForm.keyword) {
       filters.push({ fieldName: 'pipelineName', condition: 'like', value: queryForm.keyword })
     }
     if (queryForm.sourceType) {
       filters.push({ fieldName: 'sourceType', condition: 'eq', value: queryForm.sourceType })
+    }
+    // 左树单击流程叶子：精确定位这一条，不受分页/排序影响
+    if (focusedPipeline.value) {
+      filters.push({ fieldName: 'id', condition: 'eq', value: focusedPipeline.value.id })
     }
 
     const [res] = await Promise.all([
@@ -340,21 +396,44 @@ const loadDatasources = async () => {
   try {
     const list = await getDatasourceList()
     const map: Record<string, string> = {}
+    const types: Record<string, string> = {}
     for (const ds of list || []) {
-      if (ds.id) map[String(ds.id)] = ds.dsName
+      if (ds.id) {
+        map[String(ds.id)] = ds.dsName
+        types[String(ds.id)] = ds.connType || 'MYSQL'
+      }
     }
     datasourceNames.value = map
+    datasourceTypes.value = types
   } catch (e) {
     // 名称缺失时目标表列只显示表名
   }
 }
 
+/** 源类型展示：数据库源再按连接类型细分出 PostgreSQL（两者的 sourceType 都是 MYSQL） */
+const isPostgresSource = (record: EtlPipeline) =>
+  record.sourceType === 'MYSQL' && datasourceTypes.value[String(record.sourceDsId)] === 'POSTGRESQL'
+
+const sourceTypeLabel = (record: EtlPipeline) =>
+  record.sourceType !== 'MYSQL' ? 'WebAPI' : isPostgresSource(record) ? 'PostgreSQL' : 'MySQL'
+
+const sourceTypeColor = (record: EtlPipeline) =>
+  record.sourceType !== 'MYSQL' ? 'green' : isPostgresSource(record) ? 'geekblue' : 'blue'
+
 const datasourceName = (id?: string | number) =>
   id ? datasourceNames.value[String(id)] || '' : ''
+
+/** 手动查询：退出「定位单条流程」，按关键词/类型在当前目录范围内搜索 */
+const onSearch = () => {
+  focusedPipeline.value = null
+  pagination.current = 1
+  fetchPipelines()
+}
 
 const resetQuery = () => {
   queryForm.keyword = ''
   queryForm.sourceType = undefined
+  focusedPipeline.value = null
   pagination.current = 1
   fetchPipelines()
 }
@@ -372,25 +451,62 @@ const openCreatePipeline = () => {
   })
 }
 
-const openEditPipeline = (record: EtlPipeline) => {
-  currentView.value = 'editor'
-  nextTick(() => {
-    pipelineEditorRef.value?.open(record)
-  })
-}
-
 /**
- * 点击左树流程叶子：与右侧「编辑」等价，直接打开该流程配置。
- * 树节点只带 id，详情从后端取，保证与列表行数据同一口径。
+ * 按 id 取最新详情再打开编辑器。
+ * 列表行可能是「草稿保存前」的旧对象（保存不刷新列表时尤其明显），
+ * 一律以库里数据为准，避免打开后看到保存前的配置。
  */
-const onPipelineNodeSelect = async (pipelineId: string) => {
+const openEditPipelineById = async (pipelineId: string) => {
   if (!pipelineId) return
   try {
     const detail = await getPipelineDetail(pipelineId)
-    if (detail) openEditPipeline(detail)
+    if (!detail) return
+    currentView.value = 'editor'
+    nextTick(() => {
+      pipelineEditorRef.value?.open(detail)
+    })
   } catch (e) {
     // 错误已由请求拦截器统一提示
   }
+}
+
+const openEditPipeline = (record: EtlPipeline) => {
+  if (!record?.id) return
+  openEditPipelineById(String(record.id))
+}
+
+/**
+ * 左树单击流程叶子：右侧切到该流程所在目录，并精确定位到这条流程。
+ * 双击才进入编辑（见 onPipelineNodeEdit），避免单击误跳编辑页。
+ */
+const onPipelineNodeSelect = (payload: {
+  pipelineId: string
+  pipelineName: string
+  folderId: string
+  folderName: string
+  scopeIds: string[]
+}) => {
+  if (!payload?.pipelineId) return
+  currentView.value = 'list'
+  currentFolderId.value = payload.folderId
+  currentFolderScope.value = { ids: payload.scopeIds, name: payload.folderName }
+  focusedPipeline.value = { id: payload.pipelineId, name: payload.pipelineName }
+  selectedPipelineId.value = payload.pipelineId
+  pagination.current = 1
+  fetchPipelines()
+}
+
+/** 关闭定位标签：回到整个目录的流程列表 */
+const clearPipelineFocus = () => {
+  if (!focusedPipeline.value) return
+  focusedPipeline.value = null
+  pagination.current = 1
+  fetchPipelines()
+}
+
+/** 左树双击流程叶子：与右侧「编辑」等价，取详情后打开配置页 */
+const onPipelineNodeEdit = (pipelineId: string) => {
+  openEditPipelineById(pipelineId)
 }
 
 /**
@@ -415,11 +531,32 @@ const onCopyPipeline = async (record: EtlPipeline) => {
  */
 const isPipelineRunnable = (record: EtlPipeline) => !!(record.targetDsId && record.targetTable)
 
+/** 列表 + 左树一起刷新：流程新增/改名/换目录、草稿保存后都走这里 */
+const refreshListAndTree = () => {
+  fetchPipelines()
+  folderTreeRef.value?.refresh()
+}
+
 const onEditorSuccess = () => {
   currentView.value = 'list'
-  fetchPipelines()
-  // 流程新增/改名/换目录后，左树叶子同步刷新
-  folderTreeRef.value?.refresh()
+  refreshListAndTree()
+}
+
+/**
+ * 编辑器里点「返回」：回到列表并重新拉数据。
+ * 之前只切视图不取数，草稿保存后返回再打开，拿到的还是保存前的旧行。
+ */
+const onEditorBack = () => {
+  currentView.value = 'list'
+  refreshListAndTree()
+}
+
+/**
+ * 草稿保存成功（编辑器不退出）：后台同步列表与左树，
+ * 这样随后返回或再次打开都能拿到最新配置，而不是内存里的旧行。
+ */
+const onEditorSaved = () => {
+  refreshListAndTree()
 }
 
 const openLogDrawer = (record: EtlPipeline) => {
@@ -556,6 +693,19 @@ body {
   align-items: center;
   margin-bottom: 16px;
 }
+.toolbar-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.toolbar-scope {
+  font-size: 12px;
+  color: #8c8c8c;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .toolbar-title {
   display: inline-flex;
   align-items: center;
@@ -579,6 +729,10 @@ body {
   font-weight: 600;
   color: #1677ff;
   cursor: pointer;
+}
+/* 单击选中的流程行高亮；双击名称才进编辑 */
+.row-selected > td {
+  background: #e6f4ff !important;
 }
 .pipeline-name-cell .p-code {
   font-size: 12px;

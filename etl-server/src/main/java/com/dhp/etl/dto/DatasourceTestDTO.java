@@ -12,6 +12,12 @@ public class DatasourceTestDTO implements Serializable {
 
     private Long id;
 
+    /** 连接类型: MYSQL / KINGDEE_K3 / IYUNBIAO；为空按 MySQL 处理 */
+    private String connType;
+
+    /** API 类连接的明文配置 JSON（未保存时也能测） */
+    private String configJson;
+
     /** 主机 */
     private String host;
 

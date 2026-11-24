@@ -22,8 +22,9 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <mybatis-plus.version>3.5.5</mybatis-plus.version>
-        <jsqlparser.version>4.6</jsqlparser.version>
+        <mybatis-plus.version>3.5.12</mybatis-plus.version>
+        <!-- JSqlParser 4.7+ 才支持 CJK/Unicode 标识符；5.1 与 MyBatis-Plus 3.5.12 的解析模块配套 -->
+        <jsqlparser.version>5.1</jsqlparser.version>
         <jasypt.version>3.0.5</jasypt.version>
         <json-path.version>2.9.0</json-path.version>
         <hutool.version>5.8.26</hutool.version>
@@ -48,10 +49,24 @@
             <version>${mybatis-plus.version}</version>
         </dependency>
 
+        <!-- MyBatis-Plus 3.5.9+ 把分页/多租户等 SQL 解析能力拆到独立模块，需显式引入，否则分页拦截器不可用 -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-jsqlparser</artifactId>
+            <version>${mybatis-plus.version}</version>
+        </dependency>
+
         <!-- MySQL Connector -->
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- PostgreSQL 驱动（数据源接入，仅作为只读源库） -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
             <scope>runtime</scope>
         </dependency>
 

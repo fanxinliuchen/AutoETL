@@ -5,6 +5,7 @@ import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.dhp.common.exception.BizException;
 import com.dhp.common.result.ErrorCode;
+import com.dhp.etl.core.extractor.RequestVarResolver;
 import com.dhp.etl.entity.EtlPipeline;
 import com.dhp.etl.enums.WriteModeEnum;
 import com.dhp.etl.service.EtlDatasourceService;
@@ -40,6 +41,7 @@ public class AutoInsertSqlBuilder {
     private static final String STAGE_ID_COLUMN = "_stage_id";
 
     private final EtlDatasourceService datasourceService;
+    private final RequestVarResolver requestVarResolver;
 
     /**
      * 生成直通入库脚本
@@ -49,6 +51,52 @@ public class AutoInsertSqlBuilder {
      * @param logBuffer  执行日志
      */
     public String build(EtlPipeline pipeline, String stageTable, StringBuilder logBuffer) {
+        return build(pipeline, stageTable, logBuffer, Collections.emptyMap());
+    }
+
+    /**
+     * 增量同步（SYNC）比对键，映射到临时表的实际列名。
+     *
+     * <p>软删除的 NOT EXISTS 会拿这些列去临时表探针：临时表只有自增 `_stage_id` 主键，
+     * 不改的话每行都要全表扫一遍（28 万 × 29 万），所以写回前要按这组列建索引。
+     *
+     * @return 无主键 / 非数据库目标 / 键列不在临时表中时返回空集合
+     */
+    public List<String> stageKeyColumns(EtlPipeline pipeline, String stageTable) {
+        String targetTable = StrUtil.trim(pipeline.getTargetTable());
+        if (StrUtil.isBlank(targetTable) || pipeline.getTargetDsId() == null || StrUtil.isBlank(stageTable)) {
+            return List.of();
+        }
+        try (Connection conn = datasourceService.getDataSource(pipeline.getTargetDsId()).getConnection()) {
+            List<String> keys = primaryKeyColumns(conn, targetTable);
+            if (keys.isEmpty()) {
+                return List.of();
+            }
+            Map<String, String> stageIndex = new LinkedHashMap<>();
+            for (String column : columns(conn, stageTable)) {
+                if (!STAGE_ID_COLUMN.equalsIgnoreCase(column)) {
+                    stageIndex.put(column.toLowerCase(), column);
+                }
+            }
+            List<String> result = new ArrayList<>();
+            for (String key : keys) {
+                String actual = stageIndex.get(key.toLowerCase());
+                if (actual != null) {
+                    result.add(actual);
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            log.warn("解析临时表比对键失败: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * @param loopVars 循环取数当前轮的参数，用于解析增量同步范围里的 ${变量}
+     */
+    public String build(EtlPipeline pipeline, String stageTable, StringBuilder logBuffer,
+                        Map<String, String> loopVars) {
         String targetTable = StrUtil.trim(pipeline.getTargetTable());
         if (StrUtil.isBlank(targetTable)) {
             throw new BizException(ErrorCode.PARAM_ERROR, "未配置目标表，无法自动生成入库脚本");
@@ -108,7 +156,7 @@ public class AutoInsertSqlBuilder {
             // UPSERT 的冲突键直接取目标表真实主键，界面上不再手填
             List<String> targetKeys = mode == WriteModeEnum.SYNC ? List.of() : primaryKeyColumns(conn, targetTable);
             String sql = mode == WriteModeEnum.SYNC
-                    ? buildSync(conn, pipeline, targetTable, stageTable, targetColumns, matched, stageIndex, logBuffer)
+                    ? buildSync(conn, pipeline, targetTable, stageTable, targetColumns, matched, stageIndex, logBuffer, loopVars)
                     : assemble(pipeline, targetTable, stageTable, matched, stageIndex, targetKeys);
             if (mode == WriteModeEnum.UPSERT && targetKeys.isEmpty() && logBuffer != null) {
                 logBuffer.append("[处理] 提示：目标表没有主键，UPSERT 会退化为追加插入，重复运行会产生重复行。"
@@ -137,8 +185,9 @@ public class AutoInsertSqlBuilder {
                              List<String> targetColumns,
                              List<String> matched,
                              Map<String, String> stageIndex,
-                             StringBuilder logBuffer) throws Exception {
-        SyncConfig config = parseSyncConfig(pipeline.getSyncConfig());
+                             StringBuilder logBuffer,
+                             Map<String, String> loopVars) throws Exception {
+        SyncConfig config = resolveScope(parseSyncConfig(pipeline.getSyncConfig()), pipeline, logBuffer, loopVars);
 
         // 软删除控制列必须已存在于目标表
         requireColumn(targetColumns, config.getSoftDeleteColumn(), "软删除标记列");
@@ -168,18 +217,18 @@ public class AutoInsertSqlBuilder {
             logBuffer.append("[同步] 比对主键（取自目标表主键）: ").append(String.join(", ", keys)).append("\n");
         }
 
-        // 熔断：待删行数占范围内行数比例过高时中止，避免窗口填错导致大面积误标
+        // 熔断：待删行数占范围内行数比例过高时中止，避免范围填错导致大面积误标
         long scopeTotal = countScope(conn, targetTable, config);
         long toDelete = countToDelete(conn, targetTable, stageTable, matched, stageIndex, config, keys);
         double ratio = scopeTotal == 0 ? 0 : (double) toDelete / scopeTotal;
         if (logBuffer != null) {
-            logBuffer.append(String.format("[同步] 判定范围 %s >= 近 %d 天，范围内 %d 行，本次判定删除 %d 行（%.1f%%）\n",
-                    config.getScopeField(), config.getScopeDays(), scopeTotal, toDelete, ratio * 100));
+            logBuffer.append(String.format("[同步] 删除判定范围：%s，范围内 %d 行，本次判定删除 %d 行（%.1f%%）\n",
+                    config.describeScope(), scopeTotal, toDelete, ratio * 100));
         }
         if (toDelete > 0 && ratio > config.getMaxDeleteRatio()) {
             throw new BizException(ErrorCode.PARAM_ERROR, String.format(
                     "增量同步中止：本次判定删除 %d 行，占范围内 %d 行的 %.1f%%，超过阈值 %.0f%%。"
-                            + "请检查「范围字段 / 窗口天数」是否配置正确，或确认后可上调删除比例上限（maxDeleteRatio）",
+                            + "请检查「范围字段 / 范围起点终点」是否配置正确，或确认后可上调删除比例上限（maxDeleteRatio）",
                     toDelete, scopeTotal, ratio * 100, config.getMaxDeleteRatio() * 100));
         }
 
@@ -187,6 +236,78 @@ public class AutoInsertSqlBuilder {
             logBuffer.append("[处理] 写入模式：增量同步（软删除标记 + UPSERT）\n");
         }
         return assembleSync(pipeline, targetTable, stageTable, matched, stageIndex, config, keys);
+    }
+
+    /**
+     * 把「范围起点 / 范围终点」里的 ${变量} 解析成实际取值。
+     *
+     * <p>变量来源与第 2 步一致：变量定义（在目标数据源上实时计算）、循环取数当轮参数、内置的
+     * today / yesterday / now。解析在每轮开始时做一次，判定范围用的 UPDATE 与两条 COUNT 共用
+     * 同一份结果，避免同一次运行里算出不同的区间。
+     */
+    SyncConfig resolveScope(SyncConfig config,
+                            EtlPipeline pipeline,
+                            StringBuilder logBuffer,
+                            Map<String, String> loopVars) {
+        String startExpr = renderBound(requestVarResolver.resolve(pipeline, prepareBound(config.getScopeStart()), logBuffer, loopVars));
+        String endExpr = renderBound(requestVarResolver.resolve(pipeline, prepareBound(config.getScopeEnd()), logBuffer, loopVars));
+
+        if (logBuffer != null) {
+            if (StrUtil.isNotBlank(config.getScopeStart()) || StrUtil.isNotBlank(config.getScopeEnd())) {
+                logBuffer.append("[同步] 范围解析：起点 ")
+                        .append(StrUtil.isBlank(config.getScopeStart()) ? "（不限）"
+                                : config.getScopeStart() + " → " + StrUtil.blankToDefault(startExpr, "（不限）"))
+                        .append("，终点 ")
+                        .append(StrUtil.isBlank(config.getScopeEnd()) ? "（不限）"
+                                : config.getScopeEnd() + " → " + StrUtil.blankToDefault(endExpr, "（不限）"))
+                        .append("\n");
+            }
+        }
+        return config.withScopeExpr(startExpr, endExpr);
+    }
+
+    /**
+     * 变量替换前的预处理。
+     *
+     * <p>整个取值就是一个 <code>${变量}</code> 时保持原样，由 {@link #renderBound(String)} 统一加引号；
+     * 取值是 SQL 表达式（含括号）时，先把 <code>${变量}</code> 包成 <code>'${变量}'</code>——
+     * 直接替换会得到 {@code DATE_SUB(2026-11-10, INTERVAL 1 DAY)} 这种日期不带引号的写法，MySQL 会当减法算。
+     */
+    static String prepareBound(String raw) {
+        String value = StrUtil.trimToEmpty(raw);
+        if (StrUtil.isBlank(value) || !value.contains("${") || !value.contains("(")) {
+            return value;
+        }
+        java.util.regex.Matcher matcher = SCOPE_VAR_PATTERN.matcher(value);
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            matcher.appendReplacement(buffer,
+                    java.util.regex.Matcher.quoteReplacement("'" + matcher.group() + "'"));
+        }
+        matcher.appendTail(buffer);
+        return buffer.toString();
+    }
+
+    /**
+     * 把范围取值渲染成 SQL 片段：
+     * <ul>
+     *   <li>含括号 → 原生 SQL 表达式，原样使用（如 {@code DATE_SUB(CURDATE(), INTERVAL 90 DAY)}、旧版窗口天数）</li>
+     *   <li>纯数字 → 数字常量，不加引号（日期字段常见存 20261101 这类整数）</li>
+     *   <li>其余 → 文本常量，按日期/时间字符串加引号</li>
+     * </ul>
+     */
+    static String renderBound(String raw) {
+        String value = StrUtil.trimToEmpty(raw);
+        if (StrUtil.isBlank(value)) {
+            return null;
+        }
+        if (value.contains("(") || value.contains(")")) {
+            return value;
+        }
+        if (NUMERIC_PATTERN.matcher(value).matches()) {
+            return value;
+        }
+        return "'" + value.replace("'", "''") + "'";
     }
 
     /**
@@ -220,14 +341,17 @@ public class AutoInsertSqlBuilder {
         StringBuilder sql = new StringBuilder();
 
         // ① 软删除：范围内、当前未标记删除、但本次抽取结果里已不存在
+        String scopeCondition = config.scopeCondition("o");
         sql.append("UPDATE ").append(targetRef).append(" o\n")
                 .append("SET o.`").append(escape(softDeleteColumn)).append("` = 1");
         if (StrUtil.isNotBlank(softDeleteTimeColumn)) {
             sql.append(", o.`").append(escape(softDeleteTimeColumn)).append("` = NOW()");
         }
-        sql.append("\nWHERE o.`").append(escape(config.getScopeField())).append("` >= DATE_SUB(CURDATE(), INTERVAL ")
-                .append(config.getScopeDays()).append(" DAY)\n")
-                .append("  AND (o.`").append(escape(softDeleteColumn)).append("` = 0 OR o.`")
+        sql.append("\nWHERE ");
+        if (StrUtil.isNotBlank(scopeCondition)) {
+            sql.append(scopeCondition).append("\n  AND ");
+        }
+        sql.append("(o.`").append(escape(softDeleteColumn)).append("` = 0 OR o.`")
                 .append(escape(softDeleteColumn)).append("` IS NULL)\n")
                 .append("  AND NOT EXISTS (SELECT 1 FROM ").append(stageRef).append(" s WHERE ")
                 .append(keyColumns.stream()
@@ -322,13 +446,24 @@ public class AutoInsertSqlBuilder {
     private static final java.util.regex.Pattern IDENT_PATTERN =
             java.util.regex.Pattern.compile("^[A-Za-z_][A-Za-z0-9_]{0,63}$");
 
+    /** 纯数字常量（不加引号，兼容把日期存成 20261101 这类整数的字段） */
+    private static final java.util.regex.Pattern NUMERIC_PATTERN =
+            java.util.regex.Pattern.compile("^-?\\d+(\\.\\d+)?$");
+
+    /** 匹配 ${变量名}，用于把表达式里的变量占位先包成字符串字面量 */
+    private static final java.util.regex.Pattern SCOPE_VAR_PATTERN =
+            java.util.regex.Pattern.compile("\\$\\{[^}]{1,64}}");
+
+    /** 范围取值原文长度上限（避免把整段脚本塞进来） */
+    private static final int MAX_SCOPE_LENGTH = 200;
+
     /**
      * 解析增量同步配置
      */
     static SyncConfig parseSyncConfig(String json) {
         if (StrUtil.isBlank(json)) {
             throw new BizException(ErrorCode.PARAM_ERROR,
-                    "增量同步模式需要先配置：删除判定范围字段（如 FAuditDate）、窗口天数、软删除标记列");
+                    "增量同步模式需要先配置：删除判定范围字段（如 FAuditDate）、范围起点、软删除标记列");
         }
         JSONObject obj;
         try {
@@ -341,16 +476,29 @@ public class AutoInsertSqlBuilder {
         if (StrUtil.isBlank(scopeField)) {
             throw new BizException(ErrorCode.PARAM_ERROR,
                     "请填写删除判定范围字段（金蝶常见为审核时间 FAuditDate）：金蝶物理删除后无法回查，"
-                            + "只能在该字段的窗口范围内比对「目标表有、本次没抽到」来推断删除");
+                            + "只能在该字段的范围内比对「目标表有、本次没抽到」来推断删除");
         }
         if (!IDENT_PATTERN.matcher(scopeField).matches()) {
             throw new BizException(ErrorCode.PARAM_ERROR, "范围字段名不合法: " + scopeField);
         }
 
-        int scopeDays = obj.getInt("scopeDays", 0);
-        if (scopeDays <= 0 || scopeDays > 3650) {
-            throw new BizException(ErrorCode.PARAM_ERROR, "窗口天数需在 1 ~ 3650 之间，当前: " + scopeDays);
+        // 范围：起点 >= / 终点 <=，各自可以是常量、${变量} 或原生 SQL 表达式
+        String scopeStart = StrUtil.trimToEmpty(obj.getStr("scopeStart"));
+        String scopeEnd = StrUtil.trimToEmpty(obj.getStr("scopeEnd"));
+        if (StrUtil.isBlank(scopeStart) && StrUtil.isBlank(scopeEnd)) {
+            // 兼容旧配置：只有窗口天数时折算成「近 N 天」的起点，终点不限
+            int legacyDays = obj.getInt("scopeDays", 0);
+            if (legacyDays > 0 && legacyDays <= 3650) {
+                scopeStart = "DATE_SUB(CURDATE(), INTERVAL " + legacyDays + " DAY)";
+            }
         }
+        if (StrUtil.isBlank(scopeStart) && StrUtil.isBlank(scopeEnd)) {
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    "请填写删除判定范围起点（如变量 ${begindate} 或常量 2026-11-01）：范围决定比对哪些行，"
+                            + "留空会把整张目标表纳入判定");
+        }
+        validateScopeBound(scopeStart, "范围起点");
+        validateScopeBound(scopeEnd, "范围终点");
 
         String softDeleteColumn = StrUtil.trimToEmpty(obj.getStr("softDeleteColumn"));
         if (StrUtil.isBlank(softDeleteColumn)) {
@@ -373,7 +521,21 @@ public class AutoInsertSqlBuilder {
         if (maxDeleteRatio <= 0 || maxDeleteRatio > 1) {
             maxDeleteRatio = 0.5;
         }
-        return new SyncConfig(scopeField, scopeDays, softDeleteColumn, softDeleteTimeColumn, maxDeleteRatio);
+        return new SyncConfig(scopeField, scopeStart, scopeEnd, softDeleteColumn, softDeleteTimeColumn, maxDeleteRatio);
+    }
+
+    private static void validateScopeBound(String value, String label) {
+        if (StrUtil.isBlank(value)) {
+            return;
+        }
+        if (value.length() > MAX_SCOPE_LENGTH) {
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    label + "过长（上限 " + MAX_SCOPE_LENGTH + " 字符），只允许常量、${变量} 或单条 SQL 表达式");
+        }
+        if (value.contains(";")) {
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    label + "只允许单个取值，不支持分号分隔多语句");
+        }
     }
 
     private void requireColumn(List<String> targetColumns, String column, String label) {
@@ -386,9 +548,9 @@ public class AutoInsertSqlBuilder {
     }
 
     private long countScope(Connection conn, String targetTable, SyncConfig config) throws Exception {
+        String scopeCondition = config.scopeCondition(null);
         String sql = "SELECT COUNT(*) FROM " + tableRef(targetTable)
-                + " WHERE `" + escape(config.getScopeField()) + "` >= DATE_SUB(CURDATE(), INTERVAL "
-                + config.getScopeDays() + " DAY)";
+                + (StrUtil.isBlank(scopeCondition) ? "" : " WHERE " + scopeCondition);
         return queryLong(conn, sql);
     }
 
@@ -407,10 +569,11 @@ public class AutoInsertSqlBuilder {
                 })
                 .collect(Collectors.joining(" AND "));
 
+        String scopeCondition = config.scopeCondition("o");
         String sql = "SELECT COUNT(*) FROM " + tableRef(targetTable) + " o"
-                + " WHERE o.`" + escape(config.getScopeField()) + "` >= DATE_SUB(CURDATE(), INTERVAL "
-                + config.getScopeDays() + " DAY)"
-                + " AND (o.`" + escape(config.getSoftDeleteColumn()) + "` = 0 OR o.`"
+                + " WHERE "
+                + (StrUtil.isBlank(scopeCondition) ? "" : scopeCondition + " AND ")
+                + "(o.`" + escape(config.getSoftDeleteColumn()) + "` = 0 OR o.`"
                 + escape(config.getSoftDeleteColumn()) + "` IS NULL)"
                 + " AND NOT EXISTS (SELECT 1 FROM `" + escape(stageTable) + "` s WHERE " + keyJoin + ")";
         return queryLong(conn, sql);
@@ -442,8 +605,14 @@ public class AutoInsertSqlBuilder {
     public static class SyncConfig {
         /** 删除判定范围字段（通常是审核时间） */
         private final String scopeField;
-        /** 窗口天数 */
-        private final int scopeDays;
+        /** 范围起点原文（常量 / ${变量} / SQL 表达式），对应「范围字段 >= 起点」 */
+        private final String scopeStart;
+        /** 范围终点原文，对应「范围字段 < 终点」（开区间），可为空表示不设上限 */
+        private final String scopeEnd;
+        /** 起点渲染后的 SQL 片段（已解析变量、已加引号），为空表示不设下限 */
+        private final String scopeStartExpr;
+        /** 终点渲染后的 SQL 片段，为空表示不设上限 */
+        private final String scopeEndExpr;
         /** 软删除标记列 */
         private final String softDeleteColumn;
         /** 软删除时间列，可为空 */
@@ -451,13 +620,65 @@ public class AutoInsertSqlBuilder {
         /** 删除比例上限，超过则中止 */
         private final double maxDeleteRatio;
 
-        public SyncConfig(String scopeField, int scopeDays, String softDeleteColumn,
-                          String softDeleteTimeColumn, double maxDeleteRatio) {
+        public SyncConfig(String scopeField, String scopeStart, String scopeEnd,
+                          String softDeleteColumn, String softDeleteTimeColumn, double maxDeleteRatio) {
+            this(scopeField, scopeStart, scopeEnd, null, null,
+                    softDeleteColumn, softDeleteTimeColumn, maxDeleteRatio);
+        }
+
+        private SyncConfig(String scopeField, String scopeStart, String scopeEnd,
+                           String scopeStartExpr, String scopeEndExpr,
+                           String softDeleteColumn, String softDeleteTimeColumn, double maxDeleteRatio) {
             this.scopeField = scopeField;
-            this.scopeDays = scopeDays;
+            this.scopeStart = scopeStart;
+            this.scopeEnd = scopeEnd;
+            this.scopeStartExpr = scopeStartExpr;
+            this.scopeEndExpr = scopeEndExpr;
             this.softDeleteColumn = softDeleteColumn;
             this.softDeleteTimeColumn = softDeleteTimeColumn;
             this.maxDeleteRatio = maxDeleteRatio;
+        }
+
+        /**
+         * 变量解析完成后回填渲染好的片段
+         */
+        SyncConfig withScopeExpr(String startExpr, String endExpr) {
+            return new SyncConfig(scopeField, scopeStart, scopeEnd, startExpr, endExpr,
+                    softDeleteColumn, softDeleteTimeColumn, maxDeleteRatio);
+        }
+
+        /**
+         * 生成「范围字段 >= 起点 AND 范围字段 < 终点」条件；两侧都为空时返回空串
+         *
+         * <p>终点是开区间：会计区间惯例是左闭右开，日期串直接比较也不会漏掉终点当天的数据。
+         *
+         * @param alias 表别名（如 {@code o}），为空时不带前缀
+         */
+        String scopeCondition(String alias) {
+            String prefix = StrUtil.isBlank(alias) ? "" : alias + ".";
+            String column = prefix + "`" + escape(scopeField) + "`";
+            String start = resolveExpr(scopeStartExpr, scopeStart);
+            String end = resolveExpr(scopeEndExpr, scopeEnd);
+            List<String> parts = new ArrayList<>();
+            if (StrUtil.isNotBlank(start)) {
+                parts.add(column + " >= " + start);
+            }
+            if (StrUtil.isNotBlank(end)) {
+                parts.add(column + " < " + end);
+            }
+            return String.join(" AND ", parts);
+        }
+
+        /**
+         * 日志展示用：不带别名的范围条件
+         */
+        String describeScope() {
+            String condition = scopeCondition(null);
+            return StrUtil.isBlank(condition) ? "未设限（整表）" : condition;
+        }
+
+        private static String resolveExpr(String expr, String raw) {
+            return StrUtil.isNotBlank(expr) ? expr : renderBound(raw);
         }
     }
 

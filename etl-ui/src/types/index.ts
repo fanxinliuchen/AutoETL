@@ -43,15 +43,19 @@ export interface EtlFolder {
 export interface EtlDatasource {
   id?: string
   dsName: string
-  dsType: 'MYSQL' | 'MYSQL_DW'
+  /** 连接类型：MYSQL / POSTGRESQL=数据库，其余为 API 类连接（金蝶/云表） */
+  connType?: 'MYSQL' | 'POSTGRESQL' | 'KINGDEE_K3' | 'IYUNBIAO'
+  dsType: 'MYSQL' | 'MYSQL_DW' | 'POSTGRESQL'
   driverClass?: string
   host?: string
   port?: number
   databaseName?: string
   encoding?: string
   jdbcUrl?: string
-  username: string
+  username?: string
   passwordCipher?: string
+  /** API 类连接的配置 JSON（明文提交，后端加密存储；回显时敏感字段已打码） */
+  configCipher?: string
   maxPoolSize?: number
   status?: number
   remark?: string
@@ -80,7 +84,7 @@ export interface EtlPipeline {
   targetDsId?: string
   targetTable: string
   writeMode: 'APPEND' | 'OVERWRITE' | 'UPSERT' | 'SYNC'
-  /** 增量同步配置 JSON（范围字段/窗口天数/软删除列/删除比例上限） */
+  /** 增量同步配置 JSON（范围字段/范围起点/范围终点/软删除列/删除比例上限） */
   syncConfig?: string
   fieldMeta?: string
   cronExpr?: string

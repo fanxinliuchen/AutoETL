@@ -32,6 +32,7 @@
           <div
             class="tree-node-title"
             :class="{ 'is-pipeline': nodeOf(key).nodeType === 'PIPELINE' }"
+            @dblclick="onNodeDblClick(key)"
           >
             <span class="node-text" :title="nodeOf(key).pipelineCode || nodeOf(key).title">
               <node-index-outlined
@@ -40,7 +41,7 @@
               />
               <span class="node-label">{{ nodeOf(key).title }}</span>
             </span>
-            <span v-if="canManage(key)" class="node-actions" @click.stop>
+            <span v-if="canManage(key)" class="node-actions" @click.stop @dblclick.stop>
               <a-dropdown :trigger="['click']">
                 <more-outlined class="action-btn" />
                 <template #overlay>
@@ -98,8 +99,18 @@ import { Empty, message, Modal } from 'ant-design-vue'
 import { getFolderTree, saveFolder, updateFolder, deleteFolder } from '../api/folder'
 
 const emit = defineEmits<{
-  (e: 'select', folderId: string): void
-  (e: 'select-pipeline', pipelineId: string): void
+  /** scope.ids 为选中目录连同全部子孙目录的 id，便于一级目录看到下面所有子目录的流程 */
+  (e: 'select', folderId: string, scope?: { ids: string[]; name: string }): void
+  /** 单击流程叶子：右侧列表切到该流程所在目录并定位到这条流程 */
+  (e: 'select-pipeline', payload: {
+    pipelineId: string
+    pipelineName: string
+    folderId: string
+    folderName: string
+    scopeIds: string[]
+  }): void
+  /** 双击流程叶子：进入流程基本信息编辑 */
+  (e: 'edit-pipeline', pipelineId: string): void
 }>()
 
 const simpleImage = Empty.PRESENTED_IMAGE_SIMPLE
@@ -138,7 +149,31 @@ onMounted(() => {
 
 const selectRoot = () => {
   selectedKey.value = ''
-  emit('select', '')
+  emit('select', '', { ids: [], name: '' })
+}
+
+/** 选中目录 + 全部子孙目录的 id：一级目录要能看到下面所有子目录的流程 */
+const collectFolderIds = (node: any): string[] => {
+  const ids: string[] = []
+  const walk = (n: any) => {
+    if (!n) return
+    if (n.nodeType !== 'PIPELINE' && !n.synthetic && n.key !== undefined) {
+      ids.push(String(n.key))
+    }
+    ;(n.children || []).forEach(walk)
+  }
+  walk(node)
+  return ids
+}
+
+/** 按 key 在完整树里找节点：搜索过滤时子节点会被裁掉，范围要按未过滤的树算 */
+const findNode = (nodes: any[], key: string): any => {
+  for (const n of nodes) {
+    if (String(n.key) === key) return n
+    const hit = findNode(n.children || [], key)
+    if (hit) return hit
+  }
+  return null
 }
 
 /** key -> 节点数据，模板里按 key 取节点，避免依赖树组件插槽的字段透传细节 */
@@ -169,10 +204,30 @@ const onSelect = (keys: any[]) => {
   if (node.synthetic) return
   selectedKey.value = key
   if (node.nodeType === 'PIPELINE') {
-    emit('select-pipeline', String(node.pipelineId))
+    // 单击流程叶子：右侧切到该流程所在目录，并精确定位到这条流程（双击才进编辑）
+    const parentKey = node.parentId ? String(node.parentId) : ''
+    const parentNode = parentKey ? findNode(treeData.value, parentKey) : null
+    emit('select-pipeline', {
+      pipelineId: String(node.pipelineId || ''),
+      pipelineName: String(node.title || ''),
+      folderId: parentKey,
+      folderName: String(parentNode?.title || ''),
+      scopeIds: parentNode ? collectFolderIds(parentNode) : parentKey ? [parentKey] : []
+    })
     return
   }
-  emit('select', key)
+  emit('select', key, {
+    ids: collectFolderIds(findNode(treeData.value, key) || node),
+    name: String(node.title || '')
+  })
+}
+
+/** 双击流程叶子进入编辑；目录双击不做处理（展开/收起交给树本身） */
+const onNodeDblClick = (key: any) => {
+  const node = nodeOf(String(key))
+  if (node.nodeType === 'PIPELINE' && node.pipelineId) {
+    emit('edit-pipeline', String(node.pipelineId))
+  }
 }
 
 const filteredTreeData = computed(() => {

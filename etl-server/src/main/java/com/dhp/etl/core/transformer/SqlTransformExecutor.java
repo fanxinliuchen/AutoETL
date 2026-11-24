@@ -51,6 +51,24 @@ public class SqlTransformExecutor {
                               Long batchId,
                               String script,
                               StringBuilder logBuffer) throws Exception {
+        return executeScript(targetDsId, pipeline, stageTable, batchId, script, logBuffer, null);
+    }
+
+    /**
+     * 带阶段名的脚本执行：逐条语句输出「开始 / 完成（影响行数 + 耗时）」。
+     *
+     * <p>仅用于自动生成的 SYNC 脚本（软删除 → 合并两段）：这两段在大表上各自可能跑几分钟，
+     * 不打点的话日志里只有一个总耗时，出问题无法判断卡在哪一段。
+     *
+     * @param phaseLabels 与语句顺序对应的阶段名；为空表示不输出阶段日志
+     */
+    public long executeScript(Long targetDsId,
+                              EtlPipeline pipeline,
+                              String stageTable,
+                              Long batchId,
+                              String script,
+                              StringBuilder logBuffer,
+                              List<String> phaseLabels) throws Exception {
         if (StrUtil.isBlank(script)) {
             return 0;
         }
@@ -61,28 +79,43 @@ public class SqlTransformExecutor {
 
         DataSource ds = datasourceService.getDataSource(targetDsId);
         long totalAffectedRows = 0;
+        long scriptStart = System.currentTimeMillis();
 
         try (Connection conn = ds.getConnection();
              Statement stmt = conn.createStatement()) {
 
             // 按分号切分多条 SQL 语句逐条执行
             List<String> sqlList = StrUtil.splitTrim(resolvedSql, ';');
+            int phaseIndex = 0;
             for (String sql : sqlList) {
                 if (StrUtil.isBlank(sql)) {
                     continue;
                 }
+                String label = phaseLabels != null && phaseIndex < phaseLabels.size()
+                        ? phaseLabels.get(phaseIndex) : null;
+                phaseIndex++;
+
                 log.info("执行 SQL 节点: {}", sql);
+                long start = System.currentTimeMillis();
+                if (label != null) {
+                    logBuffer.append(String.format("[SQL处理] 开始执行%s...\n", label));
+                }
                 boolean hasResultSet = stmt.execute(sql);
+                long cost = System.currentTimeMillis() - start;
+                int updateCount = 0;
                 if (!hasResultSet) {
-                    int updateCount = stmt.getUpdateCount();
-                    if (updateCount > 0) {
-                        totalAffectedRows += updateCount;
-                    }
+                    updateCount = Math.max(stmt.getUpdateCount(), 0);
+                    totalAffectedRows += updateCount;
+                }
+                if (label != null) {
+                    logBuffer.append(String.format("[SQL处理] %s完成，影响 %d 行，耗时 %d ms\n",
+                            label, updateCount, cost));
                 }
             }
         }
 
-        logBuffer.append(String.format("[SQL处理] 脚本执行成功，累计影响行数: %d\n", totalAffectedRows));
+        logBuffer.append(String.format("[SQL处理] 脚本执行成功，累计影响行数: %d，总耗时 %d ms\n",
+                totalAffectedRows, System.currentTimeMillis() - scriptStart));
         return totalAffectedRows;
     }
 

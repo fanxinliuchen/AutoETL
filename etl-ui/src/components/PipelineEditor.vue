@@ -76,9 +76,9 @@
                 <a-row :gutter="24">
                   <a-col :span="12">
                     <a-form-item label="数据输入源类型" name="sourceType" required>
-                      <a-radio-group v-model:value="formData.sourceType" button-style="solid">
-                        <a-radio-button value="MYSQL">MySQL 数据库</a-radio-button>
-                        <a-radio-button value="WEB_API">WebAPI 接口 (支持金蝶/ERP)</a-radio-button>
+                      <a-radio-group v-model:value="formData.sourceType" button-style="solid" @change="onSourceTypeChange">
+                        <a-radio-button value="MYSQL">数据库</a-radio-button>
+                        <a-radio-button value="WEB_API">API接口</a-radio-button>
                       </a-radio-group>
                     </a-form-item>
                   </a-col>
@@ -114,9 +114,9 @@
               <!-- MySQL 源模式 -->
               <div v-if="formData.sourceType === 'MYSQL'">
                 <a-card :bordered="false" class="pane-card">
-                  <a-form-item label="来源 MySQL 业务数据库" name="sourceDsId" required>
+                  <a-form-item label="来源数据库（MySQL / PostgreSQL）" name="sourceDsId" required>
                     <a-select v-model:value="formData.sourceDsId" placeholder="选择抽取来源库" allow-clear>
-                      <a-select-option v-for="ds in datasourceList" :key="ds.id" :value="ds.id">
+                      <a-select-option v-for="ds in jdbcSourceList" :key="ds.id" :value="ds.id">
                         {{ ds.dsName }} ({{ ds.host ? `${ds.host}:${ds.port || 3306}/${ds.databaseName || ''}` : ds.jdbcUrl }})
                       </a-select-option>
                     </a-select>
@@ -128,54 +128,148 @@
                       placeholder="SELECT id, material_code, name, price, update_time FROM t_material WHERE update_time >= '${yesterday}'"
                     />
                   </a-form-item>
+
+                  <!-- 变量定义：抽取 SQL 里用 ${名称} 引用；变量 SQL 在目标数据源上执行 -->
+                  <div class="var-box" style="margin-bottom: 16px">
+                    <div class="var-head">
+                      <span class="var-title">变量定义</span>
+                      <span class="var-hint">
+                        SQL 里用 <code>${名称}</code> 引用，执行时在目标数据源上以 SQL 计算；内置
+                        <code>${today}</code> <code>${yesterday}</code> <code>${now}</code>
+                      </span>
+                      <a-button size="small" type="link" @click="addMysqlVariable">
+                        <plus-outlined /> 添加变量
+                      </a-button>
+                    </div>
+                    <div v-for="(v, vi) in filterVariables" :key="v.rid" class="var-item">
+                      <div class="var-row">
+                        <a-input
+                          v-model:value="v.name"
+                          size="small"
+                          class="fk-input-mono"
+                          placeholder="变量名"
+                          style="width: 148px; flex: none"
+                          @change="onMysqlVariableEdited(v)"
+                        />
+                        <span class="var-eq">=</span>
+                        <a-textarea
+                          v-model:value="v.sql"
+                          size="small"
+                          class="fk-input-mono var-sql"
+                          :auto-size="{ minRows: 1, maxRows: 3 }"
+                          placeholder="SELECT 表达式，如 DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '%Y-%m-%d')"
+                          style="flex: 1; min-width: 260px"
+                          @change="onMysqlVariableEdited(v)"
+                        />
+                        <a-tooltip title="在目标数据源上执行一次，立即看到取值">
+                          <a-button size="small" :loading="v.testing" @click="testVariable(v)">
+                            试算
+                          </a-button>
+                        </a-tooltip>
+                        <a-button size="small" type="link" danger @click="removeMysqlVariable(vi)">
+                          删除
+                        </a-button>
+                      </div>
+                      <div
+                        v-if="v.result"
+                        class="var-result"
+                        :class="{ 'var-result-err': v.resultError }"
+                      >
+                        <template v-if="v.resultError">试算失败：{{ v.result }}</template>
+                        <template v-else>
+                          {{ v.name || '结果' }} = <b>{{ v.result }}</b>
+                          <span class="var-result-time">（{{ v.elapsedMs }} ms）</span>
+                        </template>
+                      </div>
+                    </div>
+                    <div v-if="!filterVariables.length" class="var-empty">
+                      未定义变量。抽取 SQL 里需要动态日期（如「昨天」）时在此配置，例如 statDate =
+                      SELECT DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '%Y-%m-%d')
+                    </div>
+                  </div>
+
+                  <!-- 抽取字段：解析 SQL 结果列，供第 4 步映射、建目标表、临时表类型使用 -->
+                  <a-form-item>
+                    <template #label>
+                      <span class="field-list-label">
+                        抽取字段清单
+                        <a-button
+                          size="small"
+                          type="primary"
+                          ghost
+                          :loading="sourceColumnsLoading"
+                          @click="parseSourceColumns"
+                        >
+                          <thunderbolt-outlined /> 解析 SQL 字段
+                        </a-button>
+                        <a-button v-if="fieldRows.length" size="small" type="link" @click="clearSourceFields">
+                          清空字段
+                        </a-button>
+                      </span>
+                    </template>
+
+                    <ApiFieldList
+                      v-if="fieldRows.length"
+                      :rows="fieldRows"
+                      :columns="mysqlFieldColumns"
+                      :type-options="fieldTypeSelectOptions"
+                      :enabled-count="enabledFieldCount"
+                      :text-mode="textMode"
+                      :field-keys-text="''"
+                      key-placeholder="抽取结果列名（别名生效，可为中文）"
+                      hint-text=""
+                      :show-kingdee-tools="false"
+                      :show-report-tools="false"
+                      :kingdee-loading="false"
+                      :field-check-loading="false"
+                      :report-fields-loading="false"
+                      :column-name-hint="columnNameHint"
+                      @update:text-mode="textMode = $event"
+                      @row-changed="onFieldRowChanged"
+                      @add="addFieldRow"
+                      @remove="removeFieldRow"
+                      @move="moveFieldRow"
+                      @import-excel="triggerExcelImport"
+                      @export-excel="handleExportExcel"
+                      @download-template="handleDownloadTemplate"
+                      @open-paste="pasteModalVisible = true"
+                      @infer-types="handleInferTypes"
+                      @enable-all="toggleAllFieldEnabled"
+                    />
+
+                    <input
+                      ref="fileInputRef"
+                      type="file"
+                      accept=".xlsx,.xls"
+                      style="display: none"
+                      @change="onExcelFileChange"
+                    />
+                  </a-form-item>
                 </a-card>
               </div>
 
               <!-- WebAPI 源模式 (金蝶云星空 / 复杂两步会话鉴权) -->
               <div v-else>
-                <!-- 顶部两步抽取流程图可视化 (流水线节点指示) -->
-                <div class="api-flow-pipeline">
-                  <div class="flow-step-node" :class="{ active: formData.apiAuthType !== 'NONE' }">
-                    <div class="node-icon"><key-outlined /></div>
-                    <div class="node-text">
-                      <div class="node-title">步骤 1: 会话鉴权登录 (Auth)</div>
-                      <div class="node-desc">
-                        {{ formData.apiAuthType === 'KINGDEE_K3' ? '金蝶 ValidateUser 获取 KDS' : (formData.apiAuthType === 'CUSTOM_LOGIN' ? '通用前置登录获取凭证' : '无前置登录 / 直连') }}
-                      </div>
-                    </div>
-                  </div>
-                  <div class="flow-step-arrow">
-                    <div class="arrow-line"></div>
-                    <span class="arrow-badge">
-                      {{ formData.apiAuthType === 'KINGDEE_K3' ? '自动捕获 Cookie (kdservice-sessionid)' : (formData.apiAuthType === 'CUSTOM_LOGIN' ? '自动注入 Cookie / Token' : '无凭证依赖') }}
-                    </span>
-                  </div>
-                  <div class="flow-step-node active">
-                    <div class="node-icon"><database-outlined /></div>
-                    <div class="node-text">
-                      <div class="node-title">步骤 2: 单据业务抽取 (Extract)</div>
-                      <div class="node-desc">
-                        {{ formData.apiAuthType === 'KINGDEE_K3' ? 'ExecuteBillQuery 单据动态查询' : '执行主数据拉取' }}
-                      </div>
-                    </div>
-                  </div>
-                  <div class="flow-step-arrow">
-                    <div class="arrow-line"></div>
-                    <span class="arrow-badge">
-                      {{ formData.apiAuthType === 'KINGDEE_K3' ? '自动二维数组对齐与结构化' : 'JsonPath 提取解析' }}
-                    </span>
-                  </div>
-                  <div class="flow-step-node">
-                    <div class="node-icon"><table-outlined /></div>
-                    <div class="node-text">
-                      <div class="node-title">步骤 3: 临时表暂存 (${stage_table})</div>
-                      <div class="node-desc">数据落入临时表供 SQL 转换</div>
-                    </div>
-                  </div>
-                </div>
 
-                <!-- 鉴权模式切换选择 -->
-                <a-card :bordered="false" class="pane-card" style="margin-bottom: 16px">
+                <!-- 源连接（连接注册中心）：金蝶/云表选连接，接口地址与凭据由连接统一维护 -->
+                <a-card
+                  v-if="formData.sourceType === 'WEB_API'"
+                  :bordered="false"
+                  class="pane-card"
+                  style="margin-bottom: 16px"
+                >
+                  <a-form-item label="源连接（连接注册中心）">
+                    <a-select
+                      v-model:value="sourceConnValue"
+                      allow-clear
+                      placeholder="选择连接（可选）"
+                      :options="apiConnectionOptions"
+                    />
+                  </a-form-item>
+                </a-card>
+
+                <!-- 鉴权模式切换选择：选了源连接就不再需要（连接已决定怎么鉴权） -->
+                <a-card v-if="!selectedApiConn" :bordered="false" class="pane-card" style="margin-bottom: 16px">
                   <a-form-item label="接口鉴权与前置登录方式" extra="金蝶云星空等 ERP 需先调用认证接口获取 KDS/Cookie 鉴权后才能抽取单据，本系统内置全自动两步流水线无须繁琐拖拽">
                     <a-radio-group v-model:value="formData.apiAuthType" button-style="solid" @change="onAuthTypeChange">
                       <a-radio-button value="KINGDEE_K3">
@@ -191,10 +285,240 @@
                   </a-form-item>
                 </a-card>
 
-                <!-- 模式 A: 金蝶云星空 K/3 Cloud 模式 -->
-                <div v-if="formData.apiAuthType === 'KINGDEE_K3'">
-                  <!-- 步骤一：金蝶登录认证配置 -->
+                <!-- 云表模板：选了云表连接就走这套，不看 api_auth_type（那是金蝶遗留字段） -->
+                <div v-if="isYunbiaoConn">
                   <a-card
+                    title="📥 云表数据抽取配置 (formJson)"
+                    :bordered="false"
+                    class="pane-card module-card"
+                  >
+                    <template #extra>
+                      <a-space>
+                        <a-button size="small" @click="applyYunbiaoTemplate">📋 载入默认模板</a-button>
+                        <a-button size="small" @click="saveYunbiaoTemplate">💾 保存成默认模板</a-button>
+                        <a-button size="small" @click="formatJsonBody">🪄 格式化 JSON</a-button>
+                        <a-button
+                          type="primary"
+                          size="small"
+                          :loading="previewingExtract"
+                          @click="handlePreviewExtract"
+                        >
+                          <table-outlined /> 测试抽取与数据预览
+                        </a-button>
+                      </a-space>
+                    </template>
+
+                    <a-form-item label="表单名称" name="apiUrl" required>
+                      <a-input
+                        v-model:value="yunbiaoFormName"
+                        placeholder="如 表结合数采明细_IOT（只填表单名，接口地址由系统组装）"
+                      />
+                    </a-form-item>
+
+                    <a-form-item label="抽取字段列表" required>
+                      <input
+                        ref="fileInputRef"
+                        type="file"
+                        accept=".xlsx,.xls"
+                        style="display: none"
+                        @change="onExcelFileChange"
+                      />
+                      <ApiFieldList
+                        :rows="fieldRows"
+                        :columns="fieldColumns"
+                        :type-options="fieldTypeSelectOptions"
+                        :enabled-count="enabledFieldCount"
+                        :text-mode="textMode"
+                        :field-keys-text="kingdeeQuery.fieldKeys"
+                        key-placeholder="数据项名，如 采集单编码 / objectId"
+                        hint-text="字段名就是云表数据项名（可为中文）；落库列名留空则按数据项名换算。类型按实测值选：空值返回 0.0 的列要用 VARCHAR，带小数的数值用 DECIMAL。"
+                        :show-kingdee-tools="false"
+                        :show-report-tools="false"
+                        :kingdee-loading="false"
+                        :field-check-loading="false"
+                        :report-fields-loading="false"
+                        :column-name-hint="columnNameHint"
+                        @update:text-mode="textMode = $event"
+                        @update:field-keys-text="kingdeeQuery.fieldKeys = $event"
+                        @row-changed="onFieldRowChanged"
+                        @add="addFieldRow"
+                        @remove="removeFieldRow"
+                        @move="moveFieldRow"
+                        @import-excel="triggerExcelImport"
+                        @export-excel="handleExportExcel"
+                        @download-template="handleDownloadTemplate"
+                        @open-paste="pasteModalVisible = true"
+                        @infer-types="handleInferTypes"
+                        @enable-all="toggleAllFieldEnabled"
+                      />
+                    </a-form-item>
+
+                    <a-form-item label="请求体 Body（formJson）">
+                      <a-textarea
+                        v-model:value="formData.apiBody"
+                        :rows="9"
+                        class="code-textarea"
+                        :placeholder="yunbiaoBodyPlaceholder"
+                        @blur="onYunbiaoBodyChanged"
+                      />
+                      <div v-if="bodyManual" class="fk-hint">
+                        已手工编辑请求体：保存以此处文本为准，上方字段仅用于展示与解析。
+                      </div>
+                    </a-form-item>
+
+                    <!-- 变量定义：请求体里用 ${名称} 引用（过滤条件的取值也走这里）。
+                         云表只认 formJson.filter 的 expressionList 结构，所以过滤条件直接写报文，不再提供易错的简化编辑器 -->
+                    <div class="var-box" style="margin-bottom: 16px">
+                      <div class="var-head">
+                        <span class="var-title">变量定义</span>
+                        <span class="var-hint">
+                          执行时在目标数据源上以 SQL 计算，请求体里用 <code>${名称}</code> 引用；内置
+                          <code>${today}</code> <code>${yesterday}</code> <code>${now}</code>
+                        </span>
+                        <a-button size="small" type="link" @click="addVariable">
+                          <plus-outlined /> 添加变量
+                        </a-button>
+                      </div>
+                      <div v-for="(v, vi) in filterVariables" :key="v.rid" class="var-item">
+                        <div class="var-row">
+                          <a-input
+                            v-model:value="v.name"
+                            size="small"
+                            class="fk-input-mono"
+                            placeholder="变量名"
+                            style="width: 148px; flex: none"
+                            @change="onVariableEdited(v)"
+                          />
+                          <span class="var-eq">=</span>
+                          <a-textarea
+                            v-model:value="v.sql"
+                            size="small"
+                            class="fk-input-mono var-sql"
+                            :auto-size="{ minRows: 1, maxRows: 3 }"
+                            placeholder="SELECT 表达式，如 DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 6 DAY), '%Y-%m-%d')"
+                            style="flex: 1; min-width: 260px"
+                            @change="onVariableEdited(v)"
+                          />
+                          <a-tooltip title="在目标数据源上执行一次，立即看到取值">
+                            <a-button size="small" :loading="v.testing" @click="testVariable(v)">
+                              试算
+                            </a-button>
+                          </a-tooltip>
+                          <a-button size="small" type="link" danger @click="removeVariable(vi)">
+                            删除
+                          </a-button>
+                        </div>
+                        <div
+                          v-if="v.result"
+                          class="var-result"
+                          :class="{ 'var-result-err': v.resultError }"
+                        >
+                          <template v-if="v.resultError">试算失败：{{ v.result }}</template>
+                          <template v-else>
+                            {{ v.name || '结果' }} = <b>{{ v.result }}</b>
+                            <span class="var-result-time">（{{ v.elapsedMs }} ms）</span>
+                          </template>
+                        </div>
+                      </div>
+                      <div v-if="!filterVariables.length" class="var-empty">
+                        未定义变量。需要「最近 7 天」这类动态日期时，在此配置 SQL，报文里用 ${名称} 引用。
+                      </div>
+                    </div>
+
+                    <a-row :gutter="16">
+                      <a-col :span="12">
+                        <a-form-item label="结果提取 JsonPath" name="apiDataPath" required>
+                          <a-input v-model:value="formData.apiDataPath" placeholder="$.results" />
+                        </a-form-item>
+                      </a-col>
+                      <a-col :span="12">
+                        <div style="padding-top: 30px">
+                          <span style="font-size: 12px; color: #8c8c8c; margin-right: 6px">常用:</span>
+                          <a-tag class="quick-chip" @click="formData.apiDataPath = '$.results'">$.results</a-tag>
+                          <a-tag class="quick-chip" @click="formData.apiDataPath = '$.data'">$.data</a-tag>
+                        </div>
+                      </a-col>
+                    </a-row>
+
+                    <a-form-item label="分页取数">
+                      <a-switch
+                        :checked="pagination.enabled"
+                        @change="(v: any) => onYunbiaoPagingToggle(!!v)"
+                      />
+                      <span style="margin-left: 8px; font-size: 12px; color: #8c8c8c">
+                        行号模式：改写 formJson.pageInfo.rowIndex；每页条数写 pageInfo.pageSize
+                      </span>
+                    </a-form-item>
+                    <template v-if="pagination.enabled">
+                      <a-row :gutter="16">
+                        <a-col :span="6">
+                          <a-form-item label="每页条数">
+                            <a-input-number
+                              v-model:value="pagination.pageSize"
+                              :min="1"
+                              :max="5000"
+                              style="width: 100%"
+                            />
+                          </a-form-item>
+                        </a-col>
+                        <a-col :span="6">
+                          <a-form-item label="起始偏移">
+                            <a-input-number v-model:value="pagination.start" :min="0" style="width: 100%" />
+                          </a-form-item>
+                        </a-col>
+                        <a-col :span="6">
+                          <a-form-item label="增长间隔">
+                            <a-input-number v-model:value="pagination.step" :min="1" style="width: 100%" />
+                          </a-form-item>
+                        </a-col>
+                        <a-col :span="6">
+                          <a-form-item label="最多取数次数">
+                            <a-input-number
+                              v-model:value="pagination.maxPages"
+                              :min="1"
+                              :max="1000"
+                              style="width: 100%"
+                            />
+                          </a-form-item>
+                        </a-col>
+                      </a-row>
+                      <a-row :gutter="16">
+                        <a-col :span="8">
+                          <a-form-item label="偏移字段路径">
+                            <a-input
+                              v-model:value="pagination.offsetPath"
+                              placeholder="formJson.pageInfo.rowIndex"
+                            />
+                          </a-form-item>
+                        </a-col>
+                        <a-col :span="8">
+                          <a-form-item label="每页字段路径">
+                            <a-input
+                              v-model:value="pagination.limitPath"
+                              placeholder="formJson.pageInfo.pageSize"
+                            />
+                          </a-form-item>
+                        </a-col>
+                        <a-col :span="8">
+                          <a-form-item label="结束阈值（本页少于此数即停）">
+                            <a-input-number
+                              v-model:value="pagination.endWhenLessThan"
+                              :min="0"
+                              style="width: 100%"
+                            />
+                          </a-form-item>
+                        </a-col>
+                      </a-row>
+                    </template>
+                  </a-card>
+                </div>
+
+
+                <!-- 模式 A: 金蝶云星空 K/3 Cloud 模式（选了源连接后只隐藏步骤一，步骤二照常配置） -->
+                <div v-else-if="formData.apiAuthType === 'KINGDEE_K3' || selectedApiConn?.connType === 'KINGDEE_K3'">
+                  <!-- 步骤一：金蝶登录认证配置（由连接接管时隐藏） -->
+                  <a-card
+                    v-if="!selectedApiConn"
                     title="🔑 步骤一：金蝶云星空登录认证配置 (前置获取 KDS 会话凭证)"
                     :bordered="false"
                     class="pane-card module-card"
@@ -305,34 +629,20 @@
                     </div>
                   </a-card>
 
-                  <!-- 步骤二：金蝶单据数据抽取配置 -->
+                  <!-- 数据抽取配置：三种连接（金蝶连接 / 云表连接 / 手工）都要用 -->
                   <a-card
                     :title="
-                      bodyMode === 'REPORT'
-                        ? '📥 步骤二：金蝶报表取数配置 (parameters + QuicklyCondition)'
-                        : '📥 步骤二：金蝶单据数据抽取配置 (DynamicFormService.ExecuteBillQuery)'
+                      selectedApiConn?.connType === 'IYUNBIAO'
+                        ? '📥 云表数据抽取配置 (formJson)'
+                        : bodyMode === 'REPORT'
+                          ? '📥 金蝶报表取数配置 (parameters + QuicklyCondition)'
+                          : '📥 金蝶单据数据抽取配置 (DynamicFormService.ExecuteBillQuery)'
                     "
                     :bordered="false"
                     class="pane-card module-card"
                   >
                     <template #extra>
                       <a-space>
-                        <span style="font-size: 12px; color: #8c8c8c">单据快捷模板:</span>
-                        <a-button size="small" @click="loadKingdeeBillTemplate('PUR_PurchaseOrder')">
-                          📦 采购订单
-                        </a-button>
-                        <a-button size="small" @click="loadKingdeeBillTemplate('SAL_SaleOrder')">
-                          💰 销售订单
-                        </a-button>
-                        <a-button size="small" @click="loadKingdeeBillTemplate('BD_MATERIAL')">
-                          🏭 物料清单
-                        </a-button>
-                        <a-button size="small" :loading="savingCredential" @click="handleSaveCredential">
-                          💾 保存为默认
-                        </a-button>
-                        <a-button size="small" @click="formatJsonBody">
-                          🪄 格式化 JSON
-                        </a-button>
                         <a-button
                           type="primary"
                           size="small"
@@ -400,7 +710,15 @@
                         </a-form-item>
                       </a-col>
                       <a-col :span="20">
-                        <a-form-item label="单据查询接口 URL (ExecuteBillQuery)" name="apiUrl" required>
+                        <a-form-item
+                          :label="
+                            bodyMode === 'REPORT'
+                              ? '报表查询接口 URL (GetReportData)'
+                              : '单据查询接口 URL (ExecuteBillQuery)'
+                          "
+                          name="apiUrl"
+                          required
+                        >
                           <a-input
                             v-model:value="formData.apiUrl"
                             placeholder="例如：http://10.10.12.3/k3cloud/Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteBillQuery.common.kdsvc"
@@ -437,254 +755,54 @@
                           />
                         </a-form-item>
                       </a-col>
-                      <a-col :span="bodyMode === 'REPORT' ? 8 : 16">
+                    </a-row>
+
+                    <!-- 抽取字段列表：独占一行、左对齐，避免和上面的表单标识挤在一行 -->
+                    <a-row :gutter="16">
+                      <a-col :span="24">
                         <a-form-item label="抽取字段列表" required>
-                          <div class="fk-toolbar">
-                            <span class="fk-count">
-                              共 {{ fieldRows.length }} 个字段 · 启用 {{ enabledFieldCount }}
-                            </span>
-                            <a-space :size="6" wrap>
-                              <input
-                                ref="fileInputRef"
-                                type="file"
-                                accept=".xlsx,.xls"
-                                style="display: none"
-                                @change="onExcelFileChange"
-                              />
-                              <a-button size="small" @click="triggerExcelImport">
-                                <file-excel-outlined /> Excel 导入
-                              </a-button>
-                              <a-button
-                                size="small"
-                                :disabled="!fieldRows.length"
-                                @click="handleExportExcel"
-                              >
-                                <download-outlined /> 导出
-                              </a-button>
-                              <a-button size="small" @click="handleDownloadTemplate">
-                                <file-add-outlined /> 模板
-                              </a-button>
-                              <a-button
-                                size="small"
-                                :loading="kingdeeFieldsLoading"
-                                @click="handlePullKingdeeFields"
-                              >
-                                <api-outlined /> 从金蝶拉字段
-                              </a-button>
-                              <a-tooltip
-                                v-if="bodyMode === 'REPORT'"
-                                title="报表没有列定义接口，这里用 GetReportData 试取 1 行，按返回的 key 反推字段"
-                              >
-                                <a-button
-                                  size="small"
-                                  :loading="reportFieldsLoading"
-                                  @click="handleDetectReportFields"
-                                >
-                                  <table-outlined /> 从报表试取字段
-                                </a-button>
-                              </a-tooltip>
-                              <a-button size="small" @click="handleInferTypes">
-                                <bulb-outlined /> 推断类型
-                              </a-button>
-                              <a-button size="small" @click="pasteModalVisible = true">
-                                粘贴导入
-                              </a-button>
-                              <a-button size="small" type="link" @click="toggleTextMode">
-                                {{ textMode ? '切换到表格' : '文本模式' }}
-                              </a-button>
-                            </a-space>
-                          </div>
+                          <input
+                            ref="fileInputRef"
+                            type="file"
+                            accept=".xlsx,.xls"
+                            style="display: none"
+                            @change="onExcelFileChange"
+                          />
+                          <ApiFieldList
+                            :rows="fieldRows"
+                            :columns="fieldColumns"
+                            :type-options="fieldTypeSelectOptions"
+                            :enabled-count="enabledFieldCount"
+                            :text-mode="textMode"
+                            :field-keys-text="kingdeeQuery.fieldKeys"
+                            key-placeholder="如 FBillNo 或 FSaleOrgId.FNumber"
+                            hint-text="顺序即列序：抽取结果按 FieldKeys 下标对齐接口返回的顺序。类型用于创建临时表列（未指定按 TEXT），保存后生效，改类型会在下次运行时自动重建临时表。"
+                            :show-kingdee-tools="true"
+                            :show-report-tools="bodyMode === 'REPORT'"
+                            :kingdee-loading="kingdeeFieldsLoading"
+                            :field-check-loading="fieldCheckLoading"
+                            :report-fields-loading="reportFieldsLoading"
+                            :column-name-hint="columnNameHint"
+                            @update:text-mode="textMode = $event"
+                            @update:field-keys-text="kingdeeQuery.fieldKeys = $event"
+                            @row-changed="onFieldRowChanged"
+                            @add="addFieldRow"
+                            @remove="removeFieldRow"
+                            @move="moveFieldRow"
+                            @import-excel="triggerExcelImport"
+                            @export-excel="handleExportExcel"
+                            @download-template="handleDownloadTemplate"
+                            @open-paste="pasteModalVisible = true"
+                            @pull-kingdee="handlePullKingdeeFields"
+                            @validate-fields="handleValidateFieldKeys"
+                            @detect-report-fields="handleDetectReportFields"
+                            @infer-types="handleInferTypes"
+                            @enable-all="toggleAllFieldEnabled"
+                          />
                         </a-form-item>
                       </a-col>
                     </a-row>
 
-                    <div class="fk-panel">
-                      <div v-if="!textMode">
-                        <a-table
-                          :columns="fieldColumns"
-                          :data-source="fieldRows"
-                          size="small"
-                          row-key="rid"
-                          :pagination="false"
-                          :scroll="{ y: 260 }"
-                          bordered
-                        >
-                          <template #bodyCell="{ column, record, index }">
-                            <template v-if="column.dataIndex === 'idx'">
-                              {{ index + 1 }}
-                            </template>
-                            <template v-else-if="column.dataIndex === 'fieldKey'">
-                              <a-input
-                                v-model:value="record.fieldKey"
-                                size="small"
-                                placeholder="如 FBillNo"
-                                class="fk-input-mono"
-                                @change="onFieldRowChanged"
-                              />
-                            </template>
-                            <template v-else-if="column.dataIndex === 'label'">
-                              <a-input
-                                v-model:value="record.label"
-                                size="small"
-                                placeholder="选填"
-                                @change="onFieldRowChanged"
-                              />
-                            </template>
-                            <template v-else-if="column.dataIndex === 'type'">
-                              <a-tooltip title="保存后按该类型创建临时表列（未指定按 TEXT）；类型与数据不符会导致写入失败">
-                                <a-select
-                                  v-model:value="record.type"
-                                  size="small"
-                                  :options="fieldTypeSelectOptions"
-                                  style="width: 100%"
-                                  @change="onFieldRowChanged"
-                                />
-                              </a-tooltip>
-                            </template>
-                            <template v-else-if="column.dataIndex === 'enabled'">
-                              <a-switch
-                                v-model:checked="record.enabled"
-                                size="small"
-                                @change="onFieldRowChanged"
-                              />
-                            </template>
-                            <template v-else-if="column.dataIndex === 'action'">
-                              <a-space :size="0">
-                                <a-button
-                                  type="link"
-                                  size="small"
-                                  :disabled="index === 0"
-                                  @click="moveFieldRow(index, -1)"
-                                >
-                                  上移
-                                </a-button>
-                                <a-button
-                                  type="link"
-                                  size="small"
-                                  :disabled="index === fieldRows.length - 1"
-                                  @click="moveFieldRow(index, 1)"
-                                >
-                                  下移
-                                </a-button>
-                                <a-button
-                                  type="link"
-                                  size="small"
-                                  danger
-                                  @click="removeFieldRow(index)"
-                                >
-                                  删除
-                                </a-button>
-                              </a-space>
-                            </template>
-                          </template>
-                        </a-table>
-                        <div class="fk-foot">
-                          <a-button type="dashed" size="small" block @click="addFieldRow">
-                            <plus-outlined /> 添加字段
-                          </a-button>
-                        </div>
-                      </div>
-                      <div v-else>
-                        <a-textarea
-                          v-model:value="kingdeeQuery.fieldKeys"
-                          :rows="4"
-                          class="code-textarea"
-                          placeholder="例如：FID,FBillNo,FDate,FSupplierId.FNumber,FDocumentStatus"
-                          @change="onFieldKeysTextChange"
-                        />
-                      </div>
-                      <div class="fk-hint">
-                        顺序即列序：抽取结果按 FieldKeys 下标对齐金蝶返回的二维数组。类型用于创建临时表列（未指定按 TEXT），保存后生效，改类型会在下次运行时自动重建临时表。
-                      </div>
-                    </div>
-
-                    <a-modal
-                      v-model:open="pasteModalVisible"
-                      title="粘贴导入字段"
-                      ok-text="解析并导入"
-                      cancel-text="取消"
-                      @ok="confirmPasteImport"
-                    >
-                      <p style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px">
-                        每行一个字段，可用制表符或逗号分隔中文名；也可直接粘贴一整串逗号分隔的字段名。
-                      </p>
-                      <a-textarea
-                        v-model:value="pasteText"
-                        :rows="10"
-                        class="code-textarea"
-                        :placeholder="pastePlaceholder"
-                      />
-                    </a-modal>
-
-                    <a-modal
-                      v-model:open="kingdeeFieldModalVisible"
-                      title="从金蝶拉取字段"
-                      :footer="null"
-                      width="820px"
-                    >
-                      <div v-if="kingdeeFieldsLoading" class="kf-loading">
-                        <a-spin />
-                        <span>正在登录金蝶并读取表单元数据，请稍候…</span>
-                      </div>
-                      <a-alert
-                        v-else-if="kingdeeFieldError"
-                        type="error"
-                        show-icon
-                        :message="kingdeeFieldError"
-                      />
-                      <template v-else>
-                        <div class="kf-bar">
-                          <span class="fk-count">
-                            共 {{ kingdeeFields.length }} 个字段 · 已选 {{ kingdeeCheckedCount }}
-                          </span>
-                          <a-space :size="6">
-                            <a-button size="small" @click="toggleAllKingdeeFields(true)">全选</a-button>
-                            <a-button size="small" @click="toggleAllKingdeeFields(false)">清空</a-button>
-                          </a-space>
-                        </div>
-                        <a-table
-                          :columns="kingdeeColumns"
-                          :data-source="kingdeeFields"
-                          size="small"
-                          row-key="key"
-                          :pagination="false"
-                          :scroll="{ y: 380 }"
-                          bordered
-                        >
-                          <template #bodyCell="{ column, record }">
-                            <template v-if="column.dataIndex === 'checked'">
-                              <a-checkbox v-model:checked="record.checked" />
-                            </template>
-                            <template v-else-if="column.dataIndex === 'key'">
-                              <span class="fk-mono">{{ record.key }}</span>
-                            </template>
-                            <template v-else-if="column.dataIndex === 'rawType'">
-                              <span class="kf-raw">{{ record.rawType || '-' }}</span>
-                            </template>
-                            <template v-else-if="column.dataIndex === 'type'">
-                              <a-select
-                                v-model:value="record.type"
-                                size="small"
-                                :options="fieldTypeSelectOptions"
-                                style="width: 100%"
-                              />
-                            </template>
-                          </template>
-                        </a-table>
-                        <div class="kf-footer">
-                          <span class="fk-hint-inline">
-                            首次拉取会把「清单里还没有的字段」预勾选，已有字段保持不勾选，避免覆盖手工调整
-                          </span>
-                          <a-space>
-                            <a-button @click="kingdeeFieldModalVisible = false">取消</a-button>
-                            <a-button @click="applyKingdeeFields('append')">追加所选</a-button>
-                            <a-button type="primary" @click="applyKingdeeFields('replace')">
-                              覆盖为所选
-                            </a-button>
-                          </a-space>
-                        </div>
-                      </template>
-                    </a-modal>
 
                     <!-- 报表方案：查询条件 QuicklyCondition -->
                     <a-row :gutter="16" v-if="bodyMode === 'REPORT'">
@@ -1084,7 +1202,15 @@
 
                     <a-row :gutter="16">
                       <a-col :span="24">
-                        <a-form-item label="请求体 Body (JSON 格式完整结构)">
+                        <a-form-item class="body-form-item">
+                          <template #label>
+                            <div class="body-label-row">
+                              <span>请求体 Body (JSON 格式完整结构)</span>
+                              <a-button size="small" @click="formatJsonBody">
+                                🪄 格式化 JSON
+                              </a-button>
+                            </div>
+                          </template>
                           <template #extra>
                             <span class="field-hint">
                               系统已根据上方字段自动同步为金蝶标准 JSON 结构，支持在此自由微调扩展参数
@@ -1301,10 +1427,11 @@
                   </a-card>
                 </div>
 
-                <!-- 模式 B: 通用前置接口登录 (双请求) -->
+                <!-- 模式 B: 通用前置接口登录 (双请求)；选了源连接后只隐藏步骤一 -->
                 <div v-else-if="formData.apiAuthType === 'CUSTOM_LOGIN'">
-                  <!-- 步骤一：通用登录认证配置 -->
+                  <!-- 步骤一：通用登录认证配置（由连接接管时隐藏） -->
                   <a-card
+                    v-if="!selectedApiConn"
                     title="🔑 步骤一：通用前置接口鉴权配置 (获取 Token / Cookie)"
                     :bordered="false"
                     class="pane-card module-card"
@@ -1399,9 +1526,9 @@
                     </div>
                   </a-card>
 
-                  <!-- 步骤二：通用数据抽取配置 -->
+                  <!-- 数据抽取配置 -->
                   <a-card
-                    title="📥 步骤二：业务数据接口抽取配置"
+                    title="📥 业务数据接口抽取配置"
                     :bordered="false"
                     class="pane-card module-card"
                   >
@@ -1572,6 +1699,169 @@
                     </a-row>
                   </a-card>
                 </div>
+                    <!-- 字段清单的三个弹窗：放在分支外层，金蝶与云表模板共用 -->
+                    <a-modal
+                      v-model:open="pasteModalVisible"
+                      title="粘贴导入字段"
+                      ok-text="解析并导入"
+                      cancel-text="取消"
+                      @ok="confirmPasteImport"
+                    >
+                      <p style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px">
+                        每行一个字段，可用制表符或逗号分隔中文名；也可直接粘贴一整串逗号分隔的字段名。
+                      </p>
+                      <a-textarea
+                        v-model:value="pasteText"
+                        :rows="10"
+                        class="code-textarea"
+                        :placeholder="pastePlaceholder"
+                      />
+                    </a-modal>
+
+                    <a-modal
+                      v-model:open="kingdeeFieldModalVisible"
+                      title="从金蝶拉取字段"
+                      :footer="null"
+                      width="820px"
+                    >
+                      <div v-if="kingdeeFieldsLoading" class="kf-loading">
+                        <a-spin />
+                        <span>正在登录金蝶并读取表单元数据，请稍候…</span>
+                      </div>
+                      <a-alert
+                        v-else-if="kingdeeFieldError"
+                        type="error"
+                        show-icon
+                        :message="kingdeeFieldError"
+                      />
+                      <template v-else>
+                        <div class="kf-bar">
+                          <span class="fk-count">
+                            共 {{ kingdeeFields.length }} 个字段 · 已选 {{ kingdeeCheckedCount }}
+                          </span>
+                          <a-space :size="6">
+                            <a-button size="small" @click="toggleAllKingdeeFields(true)">全选</a-button>
+                            <a-button size="small" @click="toggleAllKingdeeFields(false)">清空</a-button>
+                          </a-space>
+                        </div>
+                        <a-table
+                          :columns="kingdeeColumns"
+                          :data-source="kingdeeFields"
+                          size="small"
+                          row-key="key"
+                          :pagination="false"
+                          :scroll="{ y: 380 }"
+                          bordered
+                        >
+                          <template #bodyCell="{ column, record }">
+                            <template v-if="column.dataIndex === 'checked'">
+                              <a-checkbox v-model:checked="record.checked" />
+                            </template>
+                            <template v-else-if="column.dataIndex === 'key'">
+                              <span class="fk-mono">{{ record.key }}</span>
+                            </template>
+                            <template v-else-if="column.dataIndex === 'rawType'">
+                              <span class="kf-raw">{{ record.rawType || '-' }}</span>
+                            </template>
+                            <template v-else-if="column.dataIndex === 'type'">
+                              <a-select
+                                v-model:value="record.type"
+                                size="small"
+                                :options="fieldTypeSelectOptions"
+                                style="width: 100%"
+                              />
+                            </template>
+                          </template>
+                        </a-table>
+                        <div class="kf-footer">
+                          <span class="fk-hint-inline">
+                            首次拉取会把「清单里还没有的字段」预勾选，已有字段保持不勾选，避免覆盖手工调整
+                          </span>
+                          <a-space>
+                            <a-button @click="kingdeeFieldModalVisible = false">取消</a-button>
+                            <a-button @click="applyKingdeeFields('append')">追加所选</a-button>
+                            <a-button type="primary" @click="applyKingdeeFields('replace')">
+                              覆盖为所选
+                            </a-button>
+                          </a-space>
+                        </div>
+                      </template>
+                    </a-modal>
+
+                    <!-- 字段名校验：拿金蝶元数据核对手抄错误 -->
+                    <a-modal
+                      v-model:open="fieldCheckVisible"
+                      title="字段名校验"
+                      :footer="null"
+                      width="780px"
+                    >
+                      <div v-if="fieldCheckLoading" class="kf-loading">
+                        <a-spin />
+                        <span>正在读取金蝶表单元数据并比对字段名，请稍候…</span>
+                      </div>
+                      <a-alert
+                        v-else-if="fieldCheckError"
+                        type="error"
+                        show-icon
+                        :message="fieldCheckError"
+                      />
+                      <template v-else>
+                        <a-alert
+                          v-if="fieldCheckProbeNote"
+                          type="warning"
+                          show-icon
+                          style="margin-bottom: 10px"
+                          :message="fieldCheckProbeNote"
+                        />
+                        <div class="kf-bar">
+                          <span class="fk-count">
+                            可改名 {{ fieldCheckRenameCount }} 个 · 需停用 {{ fieldCheckDisableCount }} 个
+                          </span>
+                          <a-space :size="6">
+                            <a-button size="small" @click="toggleAllFieldCheck(true)">全选</a-button>
+                            <a-button size="small" @click="toggleAllFieldCheck(false)">清空</a-button>
+                          </a-space>
+                        </div>
+                        <a-table
+                          :columns="fieldCheckColumns"
+                          :data-source="fieldCheckRows"
+                          size="small"
+                          row-key="rid"
+                          :pagination="false"
+                          :scroll="{ y: 360 }"
+                          bordered
+                        >
+                          <template #bodyCell="{ column, record }">
+                            <template v-if="column.dataIndex === 'checked'">
+                              <a-checkbox v-model:checked="record.checked" />
+                            </template>
+                            <template v-else-if="column.dataIndex === 'current'">
+                              <span class="fk-mono fk-bad">{{ record.current }}</span>
+                            </template>
+                            <template v-else-if="column.dataIndex === 'suggestion'">
+                              <span v-if="record.suggestion" class="fk-mono">{{ record.suggestion }}</span>
+                              <span v-else class="fk-hint-inline">—</span>
+                            </template>
+                            <template v-else-if="column.dataIndex === 'action'">
+                              <a-tag :color="record.action === 'RENAME' ? 'blue' : 'orange'">
+                                {{ record.action === 'RENAME' ? '改名' : '停用' }}
+                              </a-tag>
+                            </template>
+                          </template>
+                        </a-table>
+                        <div class="kf-footer">
+                          <span class="fk-hint-inline">
+                            只改字段名/启用状态，不动中文名与类型；处理后自动重算 FieldKeys 与请求体
+                          </span>
+                          <a-space>
+                            <a-button @click="fieldCheckVisible = false">取消</a-button>
+                            <a-button type="primary" @click="applyFieldCheck">
+                              应用选中处理
+                            </a-button>
+                          </a-space>
+                        </div>
+                      </template>
+                    </a-modal>
               </div>
 
               <!-- 底部导航条 -->
@@ -1650,7 +1940,7 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                         allow-clear
                         @change="onTargetDsChange"
                       >
-                        <a-select-option v-for="ds in datasourceList" :key="ds.id" :value="ds.id">
+                        <a-select-option v-for="ds in mysqlTargetList" :key="ds.id" :value="ds.id">
                           {{ ds.dsName }} ({{ ds.host ? `${ds.host}:${ds.port || 3306}/${ds.databaseName || ''}` : ds.jdbcUrl }})
                         </a-select-option>
                       </a-select>
@@ -1698,16 +1988,39 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                       </a-form-item>
                     </a-col>
                     <a-col :span="8">
-                      <a-form-item label="窗口天数（近 N 天）">
-                        <a-input-number
-                          v-model:value="syncConfig.scopeDays"
-                          :min="1"
-                          :max="3650"
-                          style="width: 100%"
+                      <a-form-item label="范围起点（>=）">
+                        <a-auto-complete
+                          v-model:value="syncConfig.scopeStart"
+                          :options="scopeBoundOptions"
+                          :filter-option="false"
+                          placeholder="如 2026-11-01，或选变量 ${begindate}"
                           @change="syncSyncConfig"
-                        />
+                          @select="(v: any) => onScopeBoundSelect('scopeStart', v)"
+                        >
+                          <template #option="item">
+                            <span>{{ item.label || item.value }}</span>
+                          </template>
+                        </a-auto-complete>
                       </a-form-item>
                     </a-col>
+                    <a-col :span="8">
+                      <a-form-item label="范围终点（<）">
+                        <a-auto-complete
+                          v-model:value="syncConfig.scopeEnd"
+                          :options="scopeBoundOptions"
+                          :filter-option="false"
+                          placeholder="如 2026-11-07，或选变量 ${enddate}"
+                          @change="syncSyncConfig"
+                          @select="(v: any) => onScopeBoundSelect('scopeEnd', v)"
+                        >
+                          <template #option="item">
+                            <span>{{ item.label || item.value }}</span>
+                          </template>
+                        </a-auto-complete>
+                      </a-form-item>
+                    </a-col>
+                  </a-row>
+                  <a-row :gutter="16">
                     <a-col :span="8">
                       <a-form-item label="删除比例上限（超过则中止）">
                         <a-input-number
@@ -1721,8 +2034,6 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                         />
                       </a-form-item>
                     </a-col>
-                  </a-row>
-                  <a-row :gutter="16">
                     <a-col :span="8">
                       <a-form-item label="软删除标记列">
                         <a-input
@@ -1743,7 +2054,7 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                     </a-col>
                   </a-row>
                   <div class="fk-hint">
-                    执行时：在「范围字段 ≥ 今天 − N 天」的窗口内，目标表有、本次抽取没有的行 → 标记删除；
+                    执行时：在「范围字段 ≥ 起点 且 &lt; 终点」的范围内，目标表有、本次抽取没有的行 → 标记删除；
                     本次数据按<b>目标表主键</b>合并写入，并把删除标记复位。第 3 步的转换 SQL 需<b>留空</b>，由系统生成脚本。
                     目标表需先具备主键与软删除列（如 <code>is_deleted TINYINT DEFAULT 0</code>、
                     <code>delete_time DATETIME NULL</code>），主键在「更新（新建）目标表」里配置。
@@ -1756,7 +2067,7 @@ ON DUPLICATE KEY UPDATE material_name = VALUES(material_name);"
                     <span class="map-title">字段映射</span>
                     <span class="map-sub">{{ mappingSummary }}</span>
                     <a-space :size="8">
-                      <a-button size="small" :loading="mappingLoading" @click="refreshMapping">
+                      <a-button size="small" :loading="mappingLoading" @click="refreshMapping(true)">
                         重新获取
                       </a-button>
                       <a-button
@@ -2096,7 +2407,6 @@ import {
   CheckOutlined,
   SaveOutlined,
   KeyOutlined,
-  DatabaseOutlined,
   TableOutlined,
   FileExcelOutlined,
   DownloadOutlined,
@@ -2104,10 +2414,13 @@ import {
   PlusOutlined,
   ApiOutlined,
   BulbOutlined,
-  SearchOutlined
+  SafetyCertificateOutlined,
+  SearchOutlined,
+  ThunderboltOutlined
 } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
 import SqlEditor from './SqlEditor.vue'
+import ApiFieldList from './ApiFieldList.vue'
 import {
   savePipeline,
   updatePipeline,
@@ -2115,12 +2428,14 @@ import {
   testWebapiLogin,
   previewWebapiExtract,
   queryKingdeeFormFields,
+  verifyKingdeeFieldKeys,
   detectKingdeeForm,
   detectKingdeeReportFields,
   saveKingdeeCredential,
   getKingdeeCredentialDefault,
   evaluateVariable,
   evaluateLoop,
+  describeSourceColumns,
   listTargetTables,
   describeTargetTable,
   applyTargetSchema,
@@ -2148,8 +2463,9 @@ import {
   type FieldRow,
   type ParseResult
 } from '../utils/fieldKeysExcel'
+import { columnNameMap, toColumnName } from '../utils/columnNaming'
 
-const emit = defineEmits(['back', 'success'])
+const emit = defineEmits(['back', 'success', 'saved'])
 
 const activeTab = ref('1')
 const isEdit = ref(false)
@@ -2158,6 +2474,269 @@ const currentId = ref<string>('')
 const formRef = ref()
 
 const datasourceList = ref<EtlDatasource[]>([])
+
+/** 连接类型显示名 */
+const connTypeLabel = (type?: string) =>
+  type === 'KINGDEE_K3'
+    ? '金蝶云星空'
+    : type === 'IYUNBIAO'
+      ? '云表 OpenAPI'
+      : type === 'POSTGRESQL'
+        ? 'PostgreSQL'
+        : 'MySQL'
+
+/** 当前选中的源连接（只认 API 类连接；MySQL 库 id 也存这个字段，不能混为一谈） */
+const selectedApiConn = computed(() =>
+  datasourceList.value.find(
+    (d) =>
+      d.id &&
+      String(d.id) === String(formData.value.sourceDsId) &&
+      d.connType &&
+      d.connType !== 'MYSQL'
+  )
+)
+
+/** 云表连接：走云表专用模板（不看 api_auth_type，那是金蝶那套的遗留字段） */
+const isYunbiaoConn = computed(() => selectedApiConn.value?.connType === 'IYUNBIAO')
+
+/**
+ * 云表只让用户填「表单名称」，`openapi/1.0/` 前缀由后端补。
+ * 回显时剥掉前缀；历史上有把金蝶接口地址误存进 api_url 的情况，这种脏值不显示，
+ * 否则用户会以为那就是表单名，保存时又原样写回去。
+ */
+const yunbiaoFormName = computed({
+  get: () => {
+    const raw = String(formData.value.apiUrl || '').trim()
+    if (raw.includes('/k3cloud/')) {
+      return ''
+    }
+    return raw.replace(/^\/?openapi\/1\.0\//, '')
+  },
+  set: (value: string) => {
+    formData.value.apiUrl = String(value || '').trim()
+  }
+})
+
+// ===== 云表简化过滤条件（直接对应报文里的 formJson.filter 数组）=====
+interface YunbiaoFilterRow {
+  rid: string
+  filterField: string
+  Operator: string
+  Value: string
+  isAnd: boolean
+}
+
+const YUNBIAO_OPERATORS = [
+  { label: '等于 ($e)', value: '$e' },
+  { label: '不等于 ($ne)', value: '$ne' },
+  { label: '大于 ($gt)', value: '$gt' },
+  { label: '大于等于 ($gte)', value: '$gte' },
+  { label: '小于 ($lt)', value: '$lt' },
+  { label: '小于等于 ($lte)', value: '$lte' },
+  { label: '包含 (Like=10)', value: '10' },
+  { label: '不包含 (NotLike=11)', value: '11' },
+  { label: '属于 (In=12)', value: '12' },
+  { label: '不属于 (NotIn=15)', value: '15' },
+  { label: '为空 (IsNull=13)', value: '13' },
+  { label: '不为空 (IsNotNull=14)', value: '14' }
+]
+
+const yunbiaoFilter = ref<YunbiaoFilterRow[]>([])
+
+const newFilterRid = () => `f_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+
+/** 从报文里读出 formJson.filter，供简化编辑器展示 */
+const loadYunbiaoFilter = () => {
+  yunbiaoFilter.value = []
+  try {
+    const root = JSON.parse(formData.value.apiBody || '{}')
+    const list = root?.formJson?.filter
+    if (Array.isArray(list)) {
+      yunbiaoFilter.value = list.map((item: any) => ({
+        rid: newFilterRid(),
+        filterField: String(item?.filterField ?? ''),
+        Operator: String(item?.Operator ?? '$e'),
+        Value: item?.Value == null ? '' : String(item.Value),
+        isAnd: item?.isAnd !== false
+      }))
+    }
+  } catch (e) {
+    // 报文不是合法 JSON 时不报错，等用户自己修
+  }
+}
+
+/** 把简化编辑器写回报文的 formJson.filter（报文非法时不动，避免覆盖用户的原文） */
+const syncYunbiaoFilter = () => {
+  try {
+    const root = JSON.parse(formData.value.apiBody || '{}')
+    if (!root.formJson) root.formJson = {}
+    root.formJson.filter = yunbiaoFilter.value
+      .filter((r) => r.filterField.trim())
+      .map((r) => ({
+        filterField: r.filterField.trim(),
+        Operator: r.Operator,
+        Value: r.Value,
+        isAnd: r.isAnd
+      }))
+    formData.value.apiBody = JSON.stringify(root, null, 2)
+    bodyManual.value = true
+  } catch (e) {
+    message.warning('请求体不是合法 JSON，过滤条件未写回，请先修正报文')
+  }
+}
+
+const addYunbiaoFilter = () => {
+  yunbiaoFilter.value.push({
+    rid: newFilterRid(),
+    filterField: '',
+    Operator: '$e',
+    Value: '',
+    isAnd: true
+  })
+}
+
+const removeYunbiaoFilter = (index: number) => {
+  yunbiaoFilter.value.splice(index, 1)
+  syncYunbiaoFilter()
+}
+
+/** 不需要值的算子（IsNull / IsNotNull） */
+const filterNeedsValue = (op: string) => op !== '13' && op !== '14'
+
+/** 云表报文体占位符 */
+const yunbiaoBodyPlaceholder = `{
+  "formJson": {
+    "pageInfo": { "isUseRowIndex": true, "pageCount": 0, "pageIndex": 0, "pageSize": 200, "rowIndex": 0, "total": 0 },
+    "filter": [],
+    "paramList": []
+  }
+}`
+
+/** 手改报文后重新解析过滤条件（用 @blur，避免边打字边重建数组） */
+const onYunbiaoBodyChanged = () => {
+  bodyManual.value = true
+  loadYunbiaoFilter()
+}
+
+/** 云表默认模板存本地：表单名 + 报文 + 分页，下次新建直接带出 */
+const YUNBIAO_TEMPLATE_KEY = 'etl.yunbiao.defaultTemplate'
+
+/** 保存当前配置为云表默认模板 */
+const saveYunbiaoTemplate = () => {
+  if (!formData.value.apiUrl || !formData.value.apiBody) {
+    message.warning('请先填写表单名称与请求体，再保存为默认模板')
+    return
+  }
+  try {
+    localStorage.setItem(
+      YUNBIAO_TEMPLATE_KEY,
+      JSON.stringify({
+        formName: formData.value.apiUrl,
+        apiBody: formData.value.apiBody,
+        apiDataPath: formData.value.apiDataPath,
+        apiPagination: pagination.value
+      })
+    )
+    message.success('已保存为云表默认模板')
+  } catch (e) {
+    message.error('保存模板失败：浏览器存储不可用')
+  }
+}
+
+/** 载入默认模板：优先用保存过的，没有就用内置的 formJson 模板 */
+const applyYunbiaoTemplate = () => {
+  let fromSaved = false
+  try {
+    const raw = localStorage.getItem(YUNBIAO_TEMPLATE_KEY)
+    if (raw) {
+      const tpl = JSON.parse(raw)
+      if (tpl.formName) formData.value.apiUrl = tpl.formName
+      if (tpl.apiBody) formData.value.apiBody = tpl.apiBody
+      formData.value.apiDataPath = tpl.apiDataPath || '$.results'
+      if (tpl.apiPagination) Object.assign(pagination.value, tpl.apiPagination)
+      fromSaved = true
+    }
+  } catch (e) {
+    // 模板损坏回退到内置
+  }
+  if (!fromSaved) {
+    formData.value.apiMethod = 'POST'
+    formData.value.apiBody = yunbiaoBodyPlaceholder
+    formData.value.apiDataPath = '$.results'
+    if (!pagination.value.offsetPath?.includes('formJson')) {
+      pagination.value.offsetPath = 'formJson.pageInfo.rowIndex'
+      pagination.value.limitPath = 'formJson.pageInfo.pageSize'
+    }
+  }
+  bodyManual.value = false
+  loadYunbiaoFilter()
+  message.success(fromSaved ? '已载入云表默认模板' : '已载入内置 formJson 模板')
+}
+
+/** 云表分页开关：默认补上 pageInfo 的行号/每页条数路径 */
+const onYunbiaoPagingToggle = (checked: boolean) => {
+  pagination.value.enabled = checked
+  if (!checked) {
+    return
+  }
+  if (!pagination.value.offsetPath?.includes('formJson')) {
+    pagination.value.offsetPath = 'formJson.pageInfo.rowIndex'
+  }
+  if (!pagination.value.limitPath?.includes('formJson')) {
+    pagination.value.limitPath = 'formJson.pageInfo.pageSize'
+  }
+  if (!pagination.value.endWhenLessThan) {
+    pagination.value.endWhenLessThan = pagination.value.pageSize
+  }
+}
+
+/** JDBC 源库：MySQL / PostgreSQL 都可以作为抽取来源（云表/金蝶是 API 连接，不在其中） */
+const jdbcSourceList = computed(() =>
+  datasourceList.value.filter(
+    (d) => !d.connType || d.connType === 'MYSQL' || d.connType === 'POSTGRESQL'
+  )
+)
+
+/** 目标端只能是 MySQL（数仓是 MySQL；PG 本期只做只读源库） */
+const mysqlTargetList = computed(() =>
+  datasourceList.value.filter((d) => !d.connType || d.connType === 'MYSQL')
+)
+
+/** 「直连免登」哨兵值：只存在于界面上，选中即表示不选连接、走手工鉴权，不落库 */
+const MANUAL_AUTH_VALUE = '__MANUAL__'
+
+/** 当前是否处于「直连免登（手工配置鉴权）」状态 */
+const manualAuth = ref(false)
+
+/** 切换输入源类型：MySQL 选的是库、API 选的是连接，同一个字段不能串 */
+const onSourceTypeChange = () => {
+  formData.value.sourceDsId = undefined
+  manualAuth.value = false
+  // 字段清单跟着源类型走：MySQL 的 SQL 字段与 API 的字段清单不能混用
+  fieldRows.value = []
+}
+
+/** 源连接下拉的绑定值：直连免登时显示哨兵值，实际 formData.sourceDsId 置空 */const sourceConnValue = computed({
+  get: () => (manualAuth.value ? MANUAL_AUTH_VALUE : formData.value.sourceDsId),
+  set: (value?: string) => {
+    if (value === MANUAL_AUTH_VALUE) {
+      manualAuth.value = true
+      formData.value.sourceDsId = undefined
+      return
+    }
+    manualAuth.value = false
+    formData.value.sourceDsId = value
+  }
+})
+
+/** 源端可选的 API 连接（金蝶 / 云表）；首项「直连免登」用于切回手工配置 */
+const apiConnectionOptions = computed(() => [
+  { label: '直连免登（手工配置鉴权）', value: MANUAL_AUTH_VALUE },
+  ...datasourceList.value
+    .filter((d) => d.connType && d.connType !== 'MYSQL')
+    .map((d) => ({ label: `${d.dsName}（${connTypeLabel(d.connType)}）`, value: d.id as string }))
+])
+
 const alertList = ref<EtlAlertConfig[]>([])
 const folderTree = ref<any[]>([])
 
@@ -2273,7 +2852,8 @@ const onBodyModeSelChange = () => {
     return
   }
   bodyMode.value = bodyModeSel.value
-  syncKingdeeQueryToBody()
+  // 显式切换取数方式：按所选模板整段重建，不做原位修补
+  syncKingdeeQueryToBody(true)
 }
 
 // FormId 改动：先同步报文，再在「自动识别」下重新探测表单类型
@@ -2352,6 +2932,33 @@ const fixReportUrl = () => {
   message.success('接口地址已修正为逗号分隔')
 }
 
+// ===== 查询接口地址随取数方式切换 =====
+// 单据走 DynamicFormService.ExecuteBillQuery，报表走 StockReportQueryService.GetReportData。
+// 两者是不同服务，只改报文不改地址，金蝶会按旧服务去解析新报文，必然报错。
+const K3_BILL_QUERY_PATH =
+  'Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteBillQuery.common.kdsvc'
+const K3_REPORT_QUERY_PATH =
+  'Kingdee.K3.SCM.WebApi.ServicesStub.StockReportQueryService.GetReportData,Kingdee.K3.SCM.WebApi.ServicesStub.common.kdsvc'
+
+/**
+ * 按当前取数方式把查询地址切到对应服务。
+ * 只在这两个已知的金蝶服务之间互换：主机与 /k3cloud/ 之前的前缀保持原样；
+ * 自定义接口地址（不含 /k3cloud/，或服务名不是这两个）一律不动，避免覆盖用户手填的地址。
+ */
+const syncQueryUrlToMode = () => {
+  const url = (formData.value.apiUrl || '').trim()
+  if (!url.includes('/k3cloud/')) return
+  const isReport = url.includes('GetReportData')
+  const isBill = url.includes('ExecuteBillQuery')
+  if (!isReport && !isBill) return
+
+  const target = bodyMode.value === 'REPORT' ? K3_REPORT_QUERY_PATH : K3_BILL_QUERY_PATH
+  if (url.endsWith(target)) return
+
+  const cut = url.indexOf('/k3cloud/') + '/k3cloud/'.length
+  formData.value.apiUrl = url.substring(0, cut) + target
+}
+
 // 报表模式的条件预览
 const quickConditionPreview = computed(() =>
   quickConditions.value
@@ -2422,8 +3029,11 @@ const loadPagination = () => {
       pagination.value = defaultPagination()
     }
   }
-  // 每页条数以「单次抓取上限」为准，避免两处配置不一致
-  const pageSize = kingdeeQuery.value.limit || pagination.value.pageSize || 2000
+  // 每页条数以「单次抓取上限」为准，避免两处配置不一致；
+  // 云表报文没有 Limit 字段，不要拿金蝶的 limit 把 rowIndex 分页的每页条数顶回 2000
+  const pageSize = isYunbiaoConn.value
+    ? pagination.value.pageSize || 200
+    : kingdeeQuery.value.limit || pagination.value.pageSize || 2000
   pagination.value.pageSize = pageSize
   // 老配置的 0（= 与每页条数相同）直接换算成具体值；与每页条数相同的也视为未自定义
   paginationCustom.value = {
@@ -2606,9 +3216,11 @@ const previewLoop = async () => {
 }
 
 // ===== 增量同步（SYNC）配置：随流程存于 sync_config =====
+// 删除判定范围用「起点 >= / 终点 <=」两个取值描述，取值可为常量、${变量} 或原生 SQL 表达式
 const defaultSyncConfig = () => ({
   scopeField: '',
-  scopeDays: 90,
+  scopeStart: '',
+  scopeEnd: '',
   softDeleteColumn: 'is_deleted',
   softDeleteTimeColumn: 'delete_time',
   maxDeleteRatio: 0.5
@@ -2620,6 +3232,12 @@ const syncSyncConfig = () => {
   formData.value.syncConfig = JSON.stringify(syncConfig.value)
 }
 
+// 范围起止支持从第 2 步的变量定义里直接挑，避免手抄 ${name} 抄错
+const onScopeBoundSelect = (field: 'scopeStart' | 'scopeEnd', value: unknown) => {
+  syncConfig.value[field] = String(value ?? '')
+  syncSyncConfig()
+}
+
 const loadSyncConfig = () => {
   syncConfig.value = defaultSyncConfig()
   if (!formData.value.syncConfig) {
@@ -2628,6 +3246,12 @@ const loadSyncConfig = () => {
   try {
     const parsed = JSON.parse(formData.value.syncConfig)
     syncConfig.value = { ...syncConfig.value, ...parsed }
+    // 兼容改造前的配置：只有窗口天数时折算成「近 N 天」的原生表达式，行为保持不变
+    const legacyDays = Number((parsed as any)?.scopeDays)
+    if (!syncConfig.value.scopeStart && !syncConfig.value.scopeEnd && legacyDays > 0) {
+      syncConfig.value.scopeStart = `DATE_SUB(CURDATE(), INTERVAL ${legacyDays} DAY)`
+    }
+    delete (syncConfig.value as any).scopeDays
   } catch (e) {
     syncConfig.value = defaultSyncConfig()
   }
@@ -2656,9 +3280,16 @@ let lastMappingTable = ''
 
 // 左侧：第 2 步抽取字段；增量同步模式自动补上软删除列
 const sourceFields = computed(() => {
-  const list = fieldRows.value
-    .filter((r) => r.fieldKey.trim() && r.enabled)
-    .map((r) => ({ name: r.fieldKey.trim(), type: r.type || 'VARCHAR(255)' }))
+  const rows = fieldRows.value.filter((r) => r.fieldKey.trim() && r.enabled)
+  // 金蝶标识可能带点（FSaleOrgId.FNumber）：发给金蝶用原名，建表/映射用换算后的列名
+  const columnNames = columnNameMap(rows.map((r) => r.fieldKey.trim()))
+  const list = rows.map((r) => {
+    const key = r.fieldKey.trim()
+    // 字段清单里手工填的「落库列名」优先，其次自动换算（中文数据项保留中文）
+    const manual = (r.column || '').trim()
+    const name = manual || columnNames.get(key) || key
+    return { name, type: r.type || 'VARCHAR(255)' }
+  })
   if (formData.value.writeMode === 'SYNC') {
     const sd = (syncConfig.value.softDeleteColumn || 'is_deleted').trim()
     const sdt = (syncConfig.value.softDeleteTimeColumn || '').trim()
@@ -2735,7 +3366,14 @@ const mappingRows = computed<MappingRow[]>(() => {
 })
 
 const mappingSummary = computed(() => {
-  if (!formData.value.targetTable || !mappingRows.value.length) return ''
+  // 第 2 步里填了字段名但没勾「启用」的，不会进映射——这类最容易被当成"字段丢了"
+  const disabled = fieldRows.value.filter((r) => r.fieldKey.trim() && !r.enabled).length
+  if (!formData.value.targetTable || !mappingRows.value.length) {
+    if (disabled) {
+      return `第 2 步有 ${disabled} 个字段未启用，未参与映射（回到第 2 步打开「启用」开关）`
+    }
+    return ''
+  }
   if (!targetColumns.value.length) return '目标表不存在，可点「更新（新建）目标表」创建'
   const miss = mappingRows.value.filter((r) => r.status === 'MISSING_IN_TARGET').length
   const extra = mappingRows.value.filter((r) => r.status === 'MISSING_IN_SOURCE').length
@@ -2745,6 +3383,7 @@ const mappingSummary = computed(() => {
     .map((r) => r.targetName)
     .filter(Boolean)
   const parts = [`共 ${mappingRows.value.length} 行`]
+  if (disabled) parts.push(`另 ${disabled} 个未启用`)
   if (miss) parts.push(`缺 ${miss} 列`)
   if (extra) parts.push(`多 ${extra} 列`)
   if (diff) parts.push(`类型不一致 ${diff}`)
@@ -2761,6 +3400,10 @@ const refreshMapping = async (force = false) => {
   if (!formData.value.targetDsId) {
     targetTableOptions.value = []
     targetColumns.value = []
+    // 原来这里静默返回，用户点按钮完全没感觉
+    if (force) {
+      message.warning('请先在下方选择「目标 MySQL 数仓连接」')
+    }
     return
   }
   const table = (formData.value.targetTable || '').trim()
@@ -2775,8 +3418,20 @@ const refreshMapping = async (force = false) => {
       ? await describeTargetTable(formData.value.targetDsId, table)
       : []
     lastMappingTable = table
+    if (force) {
+      if (!table) {
+        message.info('请先填写目标数据表名，字段映射会自动与目标表对齐')
+      } else if (!targetColumns.value.length) {
+        message.warning(`目标表 ${table} 不存在，可点「更新（新建）目标表」创建`)
+      } else {
+        message.success(`已刷新：${table}，目标表 ${targetColumns.value.length} 列`)
+      }
+    }
   } catch (e) {
     targetColumns.value = []
+    if (force) {
+      message.error('读取目标表结构失败，请检查数据源连接')
+    }
   } finally {
     mappingLoading.value = false
   }
@@ -3076,6 +3731,14 @@ const variableOptions = computed(() => {
   return [...new Set([...BUILTIN_VARIABLES, ...defined])].map((value) => ({ value }))
 })
 
+// 增量同步「范围起点/终点」下拉：选中即插入 ${变量名}，执行时在目标库上实时计算
+const scopeBoundOptions = computed(() =>
+  variableOptions.value.map((v) => ({
+    value: '${' + v.value + '}',
+    label: `${v.value}（变量）`
+  }))
+)
+
 const renderFilterValue = (row: FilterCondition) => {
   const op = row.op.toUpperCase()
   if (op === 'IN' || op === 'NOT IN') {
@@ -3133,14 +3796,12 @@ const buildFilterMeta = () =>
         type: c.type || 'VARCHAR(255)'
       }))
       .filter((c) => c.name),
-    loop: loopConfig.value.enabled
-      ? {
-          enabled: true,
-          sql: loopConfig.value.sql.trim(),
-          maxIterations: loopConfig.value.maxIterations,
-          intervalMs: loopConfig.value.intervalMs
-        }
-      : { enabled: false },
+    loop: {
+      enabled: loopConfig.value.enabled,
+      sql: loopConfig.value.sql.trim(),
+      maxIterations: loopConfig.value.maxIterations,
+      intervalMs: loopConfig.value.intervalMs
+    },
     conditions: filterConditions.value
   })
 
@@ -3196,6 +3857,29 @@ const testVariable = async (v: FilterVariable) => {
   } finally {
     v.testing = false
   }
+}
+
+// ===== MySQL 源：变量定义（写回 filter_meta.variables，供抽取 SQL 里的 ${名称} 使用）=====
+// 不复用金蝶的 applyFilterConditions：那条链路会顺带重建金蝶报文，MySQL 流程不需要
+const syncMysqlVariables = () => {
+  formData.value.filterMeta = buildFilterMeta()
+}
+
+const addMysqlVariable = () => {
+  filterVariables.value.push(defaultFilterVariable())
+  syncMysqlVariables()
+}
+
+const removeMysqlVariable = (index: number) => {
+  filterVariables.value.splice(index, 1)
+  syncMysqlVariables()
+}
+
+const onMysqlVariableEdited = (v: FilterVariable) => {
+  v.result = undefined
+  v.resultError = false
+  v.elapsedMs = undefined
+  syncMysqlVariables()
 }
 
 const addFilterCondition = () => {
@@ -3364,6 +4048,8 @@ const filterFieldOptions = computed(() =>
 // ===== 抽取字段清单（表格编辑 + Excel 导入导出） =====
 const fieldRows = ref<FieldRow[]>([])
 const textMode = ref(false)
+/** MySQL 源：正在解析抽取 SQL 的输出字段 */
+const sourceColumnsLoading = ref(false)
 const fileInputRef = ref<HTMLInputElement>()
 const pasteModalVisible = ref(false)
 const pasteText = ref('')
@@ -3388,19 +4074,44 @@ const kingdeeColumns: any[] = [
 const fieldTypeSelectOptions = FIELD_TYPE_OPTIONS.map((t) => ({ label: t, value: t }))
 const fieldColumns: any[] = [
   { title: '序号', dataIndex: 'idx', width: 56, align: 'center' },
-  // 字段名限宽：金蝶标识很少超过 24 字符，留 300 足够，剩下的宽度让给中文名
-  { title: '字段名 (FieldKey)', dataIndex: 'fieldKey', width: 300 },
-  // 中文名不设宽度，自动吃掉剩余空间（字段名收窄后这里会明显变宽）
-  { title: '中文名', dataIndex: 'label' },
+  // 字段名限宽：金蝶标识很少超过 24 字符，留 260 足够，剩下的宽度让给中文名与列名
+  { title: '字段名 (FieldKey)', dataIndex: 'fieldKey', width: 260 },
+  { title: '中文名', dataIndex: 'label', width: 140 },
+  // 云表数据项基本是中文，落库列名要能单独指定（也用于与数仓既有中文列名对齐）
+  { title: '落库列名', dataIndex: 'column', width: 150 },
   // 180 才放得下 VARCHAR(255) 全称，132 会把下拉显示成 VARCHAR(...)
-  { title: '类型', dataIndex: 'type', width: 180 },
+  { title: '类型', dataIndex: 'type', width: 170 },
   { title: '启用', dataIndex: 'enabled', width: 62, align: 'center' },
-  { title: '操作', dataIndex: 'action', width: 150, align: 'center' }
+  { title: '操作', dataIndex: 'action', width: 140, align: 'center' }
+]
+
+/**
+ * MySQL 源字段表：不提供「落库列名」。
+ * 自动入库脚本按列名对齐临时表与目标表，改名会让该列对不上被跳过；
+ * 需要改名请在 SQL 里用别名（AS xxx）解决。
+ */
+const mysqlFieldColumns: any[] = fieldColumns.filter((c) => c.dataIndex !== 'column')
+
+// 字段名校验结果表
+const fieldCheckColumns: any[] = [
+  { title: '当前字段名', dataIndex: 'current', width: 220 },
+  { title: '建议改为', dataIndex: 'suggestion', width: 220 },
+  { title: '处理', dataIndex: 'action', width: 92, align: 'center' },
+  { title: '说明', dataIndex: 'reason' },
+  { title: '应用', dataIndex: 'checked', width: 64, align: 'center' }
 ]
 
 const enabledFieldCount = computed(
   () => fieldRows.value.filter((r) => r.enabled && r.fieldKey.trim()).length
 )
+
+/** 字段标识含点号等特殊字符时，提示落库后的列名（发给金蝶仍是原名） */
+const columnNameHint = (fieldKey: string) => {
+  const raw = (fieldKey || '').trim()
+  if (!raw) return ''
+  const column = toColumnName(raw)
+  return column && column !== raw ? column : ''
+}
 
 // 通用登录前置鉴权响应式对象
 const customAuthConfig = ref({
@@ -3484,11 +4195,13 @@ const extractHost = (url: string) => {
   }
 }
 
-// 更改金蝶登录URL时，联动建议单据URL前缀
+// 更改金蝶登录URL时，只替换主机前缀，服务路径按当前取数方式保留/纠正
 const onKingdeeLoginUrlChange = () => {
   const host = extractHost(kingdeeConfig.value.loginUrl)
-  if (host && formData.value.apiUrl && formData.value.apiUrl.includes('/k3cloud/')) {
-    formData.value.apiUrl = `${host}/k3cloud/Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteBillQuery.common.kdsvc`
+  const url = formData.value.apiUrl || ''
+  if (host && url.includes('/k3cloud/')) {
+    formData.value.apiUrl = `${host}${url.substring(url.indexOf('/k3cloud/'))}`
+    syncQueryUrlToMode()
   }
   syncKingdeeLoginBody()
 }
@@ -3508,8 +4221,72 @@ const syncKingdeeLoginBody = () => {
   })
 }
 
+/** 标准查询模板 data 里会出现的键；出现别的（Model / SchemeId / IsVerifyBaseDataField…）说明是自定义报文 */
+const STANDARD_BODY_KEYS = [
+  'FormId',
+  'FieldKeys',
+  'FilterString',
+  'OrderString',
+  'TopRowCount',
+  'Limit',
+  'StartRow'
+]
+
+/**
+ * 是否自定义报文：data 里带了标准模板之外的节点。
+ *
+ * <p>典型例子是 GetSysReportData 的 Model 报文——它同样有 data.FieldKeys，会被误判成标准查询；
+ * 如果按标准模板重建，Model 整段会被冲掉，流程直接跑不起来。
+ */
+const isCustomBodyText = (text?: string) => {
+  const raw = (text || '').trim()
+  if (!raw.startsWith('{')) return false
+  let root: any
+  try {
+    root = JSON.parse(raw)
+  } catch (e) {
+    return false
+  }
+  if (!root || typeof root !== 'object' || Array.isArray(root)) return false
+  const d = root.data && typeof root.data === 'object' && !Array.isArray(root.data) ? root.data : null
+  if (!d) return false
+  return Object.keys(d).some((k) => !STANDARD_BODY_KEYS.includes(k))
+}
+
+/**
+ * 自定义报文原位修补：只同步 FormId / FieldKeys / Limit / StartRow，
+ * Model、SchemeId 等模板之外的节点原样保留。命中自定义报文时返回 true。
+ */
+const patchCustomBody = (): boolean => {
+  const raw = (formData.value.apiBody || '').trim()
+  if (!isCustomBodyText(raw)) return false
+  let root: any
+  try {
+    root = JSON.parse(raw)
+  } catch (e) {
+    return false
+  }
+  const target = root.data && typeof root.data === 'object' ? root.data : root
+  if ('FieldKeys' in target) target.FieldKeys = kingdeeQuery.value.fieldKeys || ''
+  if ('Limit' in target) target.Limit = kingdeeQuery.value.limit || 2000
+  if ('StartRow' in target) target.StartRow = 0
+  if ('FormId' in target) {
+    target.FormId = kingdeeQuery.value.formId || ''
+  } else if ('FormId' in root) {
+    root.FormId = kingdeeQuery.value.formId || ''
+  }
+  formData.value.apiBody = JSON.stringify(root, null, 2)
+  bodySaveWarning.value = '自定义报文：已原位同步 FormId / FieldKeys / Limit，Model 等其余节点保持不变'
+  return true
+}
+
 // 同步金蝶单据参数至 Body
-const syncKingdeeQueryToBody = () => {
+// force=true 表示用户显式切换了取数方式，按新模板整段重建；否则自定义报文只做原位修补
+const syncKingdeeQueryToBody = (force = false) => {
+  // 自定义报文只做原位修补，不整段重建——否则 Model 之类的自有节点会被标准模板冲掉
+  if (!force && patchCustomBody()) {
+    return
+  }
   // 由向导字段重建报文，视为系统生成，保存时不再保留手工原文
   bodyManual.value = false
   if (bodyMode.value === 'REPORT') {
@@ -3576,6 +4353,9 @@ const syncKingdeeQueryToBody = () => {
     pagination.value.offsetPath = 'data.StartRow'
     pagination.value.limitPath = 'data.Limit'
   }
+
+  // 查询接口地址跟随取数方式：单据 ExecuteBillQuery / 报表 GetReportData
+  syncQueryUrlToMode()
 }
 
 // 由 FieldKeys 串重建表格行（保留已存在行的中文名/类型/启用/备注）
@@ -3585,7 +4365,15 @@ const rebuildFieldRows = () => {
 
 // 表格变更 -> 回写 FieldKeys -> 同步金蝶请求体
 const applyFieldRows = () => {
+  // MySQL 源的字段清单只落 field_meta，没有 FieldKeys / 金蝶报文的概念，不能反向污染
+  if (formData.value.sourceType === 'MYSQL') {
+    return
+  }
   kingdeeQuery.value.fieldKeys = joinFieldKeys(fieldRows.value)
+  // 云表的报文是 formJson，与字段清单无对应关系，套金蝶模板会把它冲掉
+  if (isYunbiaoConn.value) {
+    return
+  }
   syncKingdeeQueryToBody()
 }
 
@@ -3593,8 +4381,109 @@ const onFieldRowChanged = () => {
   applyFieldRows()
 }
 
+/** 批量启用/停用：导入的历史字段常是关闭的，逐个点太慢 */
+const toggleAllFieldEnabled = (enabled: boolean) => {
+  const rows = fieldRows.value.filter((r) => r.fieldKey.trim())
+  if (!rows.length) {
+    message.warning('还没有可切换的字段')
+    return
+  }
+  rows.forEach((r) => {
+    r.enabled = enabled
+  })
+  applyFieldRows()
+  message.success(`已${enabled ? '启用' : '停用'} ${rows.length} 个字段`)
+}
+
+/**
+ * MySQL 源：解析抽取 SQL 的输出字段。
+ * 差量合并：按列名（忽略大小写）对齐——新增列追加、消失列删除、类型变化则更新，
+ * 未变化的字段保留用户已改的类型/落库列名/备注/启用状态。
+ */
+const parseSourceColumns = async () => {
+  const dsId = formData.value.sourceDsId
+  if (!dsId) {
+    message.warning('请先选择来源 MySQL 数据库')
+    return
+  }
+  const sql = (formData.value.sourceQuerySql || '').trim()
+  if (!sql) {
+    message.warning('请先填写抽取 SQL 查询语句')
+    return
+  }
+  sourceColumnsLoading.value = true
+  try {
+    const res = await describeSourceColumns({
+      datasourceId: dsId,
+      sql,
+      pipelineId: currentId.value || undefined
+    })
+    const parsed = res.columns || []
+    if (!parsed.length) {
+      message.warning('这条 SQL 没有解析到任何列')
+      return
+    }
+
+    const existing = new Map<string, FieldRow>()
+    for (const row of fieldRows.value) {
+      const key = row.fieldKey.trim().toLowerCase()
+      if (key) existing.set(key, row)
+    }
+
+    let added = 0
+    let updated = 0
+    let unchanged = 0
+    const merged: FieldRow[] = parsed.map((col) => {
+      const key = col.name.trim().toLowerCase()
+      const type = (col.type || 'VARCHAR(255)').toUpperCase()
+      const old = existing.get(key)
+      if (!old) {
+        added += 1
+        return createRow({ fieldKey: col.name, type, enabled: true })
+      }
+      existing.delete(key)
+      if ((old.type || '').toUpperCase() !== type) {
+        updated += 1
+        return { ...old, type }
+      }
+      unchanged += 1
+      return old
+    })
+    const removed = existing.size
+    fieldRows.value = merged
+    message.success(
+      `解析完成：新增 ${added} 列，更新类型 ${updated} 列，删除 ${removed} 列，未变 ${unchanged} 列`
+    )
+    if (res.warnings && res.warnings.length) {
+      message.warning(res.warnings.slice(0, 2).join('；'))
+    }
+  } catch (e: any) {
+    // 错误已由请求拦截器统一提示
+  } finally {
+    sourceColumnsLoading.value = false
+  }
+}
+
+/** 清空 MySQL 解析出来的字段清单 */
+const clearSourceFields = () => {
+  if (!fieldRows.value.length) return
+  Modal.confirm({
+    title: '清空抽取字段？',
+    content: '第 4 步字段映射与「更新（新建）目标表」都会失去字段来源，需要重新解析。',
+    okText: '清空',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: () => {
+      fieldRows.value = []
+      message.success('字段清单已清空')
+    }
+  })
+}
+
 const onFieldKeysTextChange = () => {
-  syncKingdeeQueryToBody()
+  if (!isYunbiaoConn.value) {
+    syncKingdeeQueryToBody()
+  }
   rebuildFieldRows()
 }
 
@@ -3735,6 +4624,253 @@ const handlePullKingdeeFields = async () => {
   } finally {
     kingdeeFieldsLoading.value = false
   }
+}
+
+// ===== 字段名校验：用金蝶元数据抓 l/I、n/r 这类手抄错误 =====
+interface FieldCheckRow {
+  rid: string
+  current: string
+  suggestion: string
+  reason: string
+  /** RENAME=改成建议值；DISABLE=金蝶实测不认这个字段，需停用（不参与取数） */
+  action: 'RENAME' | 'DISABLE'
+  checked: boolean
+}
+
+const fieldCheckVisible = ref(false)
+const fieldCheckLoading = ref(false)
+const fieldCheckError = ref('')
+const fieldCheckRows = ref<FieldCheckRow[]>([])
+/** 存在性实测没跑成时的说明（只完成拼写核对） */
+const fieldCheckProbeNote = ref('')
+
+/** 点号后缀是手工补的基础资料属性，元数据里没有，只能按标准写法校验大小写 */
+const K3_PROP_SUFFIXES = ['FNumber', 'FName', 'FCaption', 'FDataValue', 'FID', 'FGroup']
+
+/** 易混字符归一：l/I/1 视为同一个，0/O 视为同一个，rn 与 m 视为同一个 */
+const normalizeConfusable = (text: string) =>
+  text
+    .toLowerCase()
+    .replace(/rn/g, 'm')
+    .replace(/[li1]/g, 'i')
+    .replace(/0/g, 'o')
+
+/** 编辑距离：没有精确命中时找「最接近的字段」 */
+const editDistance = (a: string, b: string) => {
+  const m = a.length
+  const n = b.length
+  if (!m) return n
+  if (!n) return m
+  let prev = Array.from({ length: n + 1 }, (_, i) => i)
+  for (let i = 1; i <= m; i++) {
+    const cur: number[] = [i]
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      )
+    }
+    prev = cur
+  }
+  return prev[n]
+}
+
+const toggleAllFieldCheck = (checked: boolean) => {
+  fieldCheckRows.value.forEach((row) => (row.checked = checked))
+}
+
+/** 校验结果分两类计数：能自动改名的 / 只能停用的 */
+const fieldCheckRenameCount = computed(
+  () => fieldCheckRows.value.filter((r) => r.action === 'RENAME').length
+)
+const fieldCheckDisableCount = computed(
+  () => fieldCheckRows.value.filter((r) => r.action === 'DISABLE').length
+)
+
+/**
+ * 用金蝶表单元数据核对字段清单：
+ * 元数据只有字段标识（FSaleOrgId），点号后缀（.FNumber）是手工补的，
+ * 所以头部按元数据比对，后缀只按标准写法校验大小写。
+ */
+const handleValidateFieldKeys = async () => {
+  if (!kingdeeQuery.value.formId) {
+    message.warning('请先填写业务对象表单标识 FormId')
+    return
+  }
+  if (!kingdeeConfig.value.loginUrl) {
+    message.warning('请先在上方填写金蝶登录接口地址')
+    return
+  }
+  const rows = fieldRows.value.filter((r) => r.fieldKey.trim())
+  if (!rows.length) {
+    message.warning('字段清单为空，没有可校验的字段名')
+    return
+  }
+
+  fieldCheckVisible.value = true
+  fieldCheckLoading.value = true
+  fieldCheckError.value = ''
+  fieldCheckProbeNote.value = ''
+  fieldCheckRows.value = []
+  try {
+    const list = await queryKingdeeFormFields({
+      loginUrl: kingdeeConfig.value.loginUrl,
+      acctID: kingdeeConfig.value.acctID,
+      userName: kingdeeConfig.value.userName,
+      password: effectivePassword() || undefined,
+      lcid: kingdeeConfig.value.lcid,
+      formId: kingdeeQuery.value.formId
+    })
+    if (!list || !list.length) {
+      fieldCheckError.value = '金蝶未返回字段定义（报表类表单没有元数据），无法校验字段名'
+      return
+    }
+
+    const validKeys = list.map((f) => (f.key || '').trim()).filter(Boolean)
+    const canonical = new Map(validKeys.map((k) => [k.toUpperCase(), k]))
+    const normalizedValid = validKeys.map((k) => ({ key: k, norm: normalizeConfusable(k) }))
+
+    // 第二步：让金蝶用 ExecuteBillQuery 真查一次，逐个点名「元数据中标识为 X 的字段不存在」。
+    // 只比元数据不够——QueryBusinessInfo 返回的字段并不完整，合法字段会被误判成不存在。
+    const invalidSet = new Set<string>()
+    let probeNote = ''
+    try {
+      const probe = await verifyKingdeeFieldKeys({
+        loginUrl: kingdeeConfig.value.loginUrl,
+        acctID: kingdeeConfig.value.acctID,
+        userName: kingdeeConfig.value.userName,
+        password: effectivePassword() || undefined,
+        lcid: kingdeeConfig.value.lcid,
+        formId: kingdeeQuery.value.formId,
+        billQueryUrl: formData.value.apiUrl,
+        fieldKeys: rows.map((r) => r.fieldKey.trim()).join(',')
+      })
+      ;(probe.invalid || []).forEach((k) => invalidSet.add(String(k).trim().toUpperCase()))
+      if (probe.note) {
+        probeNote = probe.note
+      }
+    } catch (e: any) {
+      probeNote = `字段存在性实测未完成（${e?.message || '未知原因'}），以下只给拼写建议`
+    }
+
+    const problems: FieldCheckRow[] = []
+    for (const row of rows) {
+      const raw = row.fieldKey.trim()
+      const dot = raw.indexOf('.')
+      const head = dot >= 0 ? raw.slice(0, dot) : raw
+      const suffix = dot >= 0 ? raw.slice(dot + 1) : ''
+      let suggestion = ''
+      let reason = ''
+
+      // ① 金蝶实测不认：元数据里可能压根没这个标识，改名字也救不回来，只能停用
+      if (invalidSet.has(raw.toUpperCase())) {
+        problems.push({
+          rid: row.rid,
+          current: raw,
+          suggestion: '',
+          reason: '金蝶实测该字段不存在，运行时必报「字段不存在」；确认后可停用（保留行，不参与取数）',
+          action: 'DISABLE',
+          checked: true
+        })
+        continue
+      }
+
+      const canonHead = canonical.get(head.toUpperCase())
+      if (!canonHead) {
+        // 元数据里没有、但实测通过：子单据体/自定义字段常见（如 FMaterialName），不当作问题
+        const normHead = normalizeConfusable(head)
+        let best: string | null = null
+        let bestDist = 99
+        let confusable = false
+        for (const item of normalizedValid) {
+          if (item.norm === normHead) {
+            best = item.key
+            bestDist = 0
+            confusable = true
+            break
+          }
+          const dist = editDistance(normHead, item.norm)
+          if (dist < bestDist) {
+            bestDist = dist
+            best = item.key
+          }
+        }
+        if (best && bestDist <= 2) {
+          suggestion = suffix ? `${best}.${suffix}` : best
+          reason = confusable
+            ? '字符混淆（l/I、1/I、0/O 之类）'
+            : `疑似抄错，最接近 ${best}（差 ${bestDist} 个字符）`
+        }
+      } else {
+        if (canonHead !== head) {
+          suggestion = suffix ? `${canonHead}.${suffix}` : canonHead
+          reason = '大小写不一致'
+        }
+        if (suffix) {
+          const canonSuffix = K3_PROP_SUFFIXES.find(
+            (s) => s.toLowerCase() === suffix.toLowerCase()
+          )
+          if (canonSuffix && canonSuffix !== suffix) {
+            suggestion = `${canonHead}.${canonSuffix}`
+            reason = reason
+              ? `${reason}；后缀应为 ${canonSuffix}`
+              : `后缀大小写应为 ${canonSuffix}`
+          }
+        }
+      }
+
+      if (suggestion && suggestion !== raw) {
+        problems.push({ rid: row.rid, current: raw, suggestion, reason, action: 'RENAME', checked: true })
+      }
+    }
+
+    fieldCheckProbeNote.value = probeNote
+    fieldCheckRows.value = problems
+    if (!problems.length) {
+      fieldCheckVisible.value = false
+      if (probeNote) {
+        message.warning(`已核对 ${rows.length} 个字段，拼写一致；${probeNote}`)
+      } else {
+        message.success(`已核对 ${rows.length} 个字段，金蝶实测全部可用`)
+      }
+    }
+  } catch (e: any) {
+    fieldCheckError.value = e?.message || '校验失败，请检查登录配置'
+  } finally {
+    fieldCheckLoading.value = false
+  }
+}
+
+const applyFieldCheck = () => {
+  const picked = fieldCheckRows.value.filter((r) => r.checked)
+  if (!picked.length) {
+    message.warning('没有勾选要处理的字段')
+    return
+  }
+  const byRid = new Map(picked.map((r) => [r.rid, r]))
+  let renamed = 0
+  let disabled = 0
+  for (const row of fieldRows.value) {
+    const hit = byRid.get(row.rid)
+    if (!hit) continue
+    if (hit.action === 'DISABLE') {
+      // 停用而不是删行：保留中文名/类型，方便以后改名后直接启用
+      if (row.enabled) {
+        row.enabled = false
+        disabled++
+      }
+    } else if (hit.suggestion && hit.suggestion !== row.fieldKey.trim()) {
+      row.fieldKey = hit.suggestion
+      renamed++
+    }
+  }
+  applyFieldRows()
+  fieldCheckVisible.value = false
+  const parts: string[] = []
+  if (renamed) parts.push(`修正 ${renamed} 个字段名`)
+  if (disabled) parts.push(`停用 ${disabled} 个不存在的字段`)
+  message.success(`${parts.join('，') || '没有变更'}；FieldKeys 与请求体已同步`)
 }
 
 /**
@@ -4079,40 +5215,6 @@ const loadCredentialSilently = async () => {
   }
 }
 
-// 载入金蝶常用单据模板
-const loadKingdeeBillTemplate = (billType: string) => {
-  if (billType === 'PUR_PurchaseOrder') {
-    kingdeeQuery.value = {
-      formId: 'PUR_PurchaseOrder',
-      fieldKeys: 'FID,FBillNo,FDate,FSupplierId.FNumber,FDocumentStatus',
-      filterString: "FDate >= '${yesterday}'",
-      orderString: 'FID DESC',
-      limit: 2000
-    }
-  } else if (billType === 'SAL_SaleOrder') {
-    kingdeeQuery.value = {
-      formId: 'SAL_SaleOrder',
-      fieldKeys: 'FID,FBillNo,FDate,FCustId.FNumber,FBillAllAmount,FDocumentStatus',
-      filterString: "FDate >= '${yesterday}'",
-      orderString: 'FID DESC',
-      limit: 2000
-    }
-  } else if (billType === 'BD_MATERIAL') {
-    kingdeeQuery.value = {
-      formId: 'BD_MATERIAL',
-      fieldKeys: 'FMaterialId,FNumber,FName,FSpecification,FMaterialGroup.FNumber',
-      filterString: "FApproveDate >= '${yesterday}'",
-      orderString: 'FMaterialId ASC',
-      limit: 2000
-    }
-  }
-  syncKingdeeQueryToBody()
-  rebuildFieldRows()
-  loadFilter()
-  loadSyncConfig()
-  message.success(`已载入 ${billType} 常用抽取字段与过滤条件`)
-}
-
 // 测试前置登录
 const handleTestLogin = async () => {
   const authType = formData.value.apiAuthType || 'KINGDEE_K3'
@@ -4166,7 +5268,9 @@ const handlePreviewExtract = async () => {
   previewingExtract.value = true
   try {
     // 确保 authConfig 同步
-    if (formData.value.apiAuthType === 'KINGDEE_K3') {
+    if (isYunbiaoConn.value) {
+      // 云表：报文原样送去预览，套金蝶模板会把 formJson 冲掉
+    } else if (formData.value.apiAuthType === 'KINGDEE_K3') {
       syncKingdeeLoginBody()
       syncKingdeeQueryToBody()
     } else if (formData.value.apiAuthType === 'CUSTOM_LOGIN') {
@@ -4230,10 +5334,16 @@ const selectPresetCron = ({ key }: { key: string }) => {
 }
 
 // 对外暴露 open 方法以供 App.vue 调用
+/** 打开时的原始记录：编辑态「重置」就是回到这份配置 */
+const originalRecord = ref<EtlPipeline>()
+
 const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
+  originalRecord.value = record
   activeTab.value = '1'
   loginTestResult.value = null
   previewResult.value = null
+  // 「直连免登」只是界面态：打开流程一律按库里有没有源连接来定，避免串上一条流程
+  manualAuth.value = false
 
   // 加载数据源、告警通道、目录树
   try {
@@ -4269,8 +5379,9 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
           customAuthConfig.value = { ...customAuthConfig.value, ...parsedAuth }
         }
       } catch (e) {}
-    } else {
-      // 老流程没存过鉴权配置时，套用已保存凭证，避免重复手填
+    } else if (!selectedApiConn.value) {
+      // 老流程没存过鉴权配置时，套用已保存凭证，避免重复手填。
+      // 选了云表连接的流程绝不能走这里——凭证里的金蝶 queryUrl 会把表单名称冲成 k3cloud 地址
       await loadCredentialSilently()
     }
 
@@ -4282,19 +5393,28 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     detectError.value = ''
     if (record.apiBody) {
       const shape = syncBodyToKingdeeQuery()
-      if (shape === 'UNKNOWN' && record.apiBody.trim().startsWith('{')) {
+      // 自定义报文（如 GetSysReportData 的 Model 报文）也按手工内容处理：
+      // 它带 data.FieldKeys，会被识别成「标准查询」，不标记就会被保存时的模板重写
+      if (record.apiBody.trim().startsWith('{') && (shape === 'UNKNOWN' || isCustomBodyText(record.apiBody))) {
         bodyManual.value = true
       }
     } else {
       fieldRows.value = []
     }
-    // 中文名/类型/备注来自 field_meta（启用状态仍以 FieldKeys 为准）
+    // 中文名/类型/备注来自 field_meta（启用状态以 field_meta 里存的为准）
     if (record.fieldMeta) {
-      fieldRows.value = fieldRowsFromMeta(record.fieldMeta, kingdeeQuery.value.fieldKeys)
+      // 云表报文没有 FieldKeys；MySQL 源也没有金蝶 FieldKeys。
+      // kingdeeQuery 里残留的上一个金蝶流程字段会被当成「清单里没有的」追加到末尾，所以不能传
+      const noFieldKeys = isYunbiaoConn.value || formData.value.sourceType === 'MYSQL'
+      fieldRows.value = fieldRowsFromMeta(
+        record.fieldMeta,
+        noFieldKeys ? '' : kingdeeQuery.value.fieldKeys
+      )
     }
     loadPagination()
     loadFilter()
     loadSyncConfig()
+    loadYunbiaoFilter()
     // 手动钉死的取数方式优先于报文里体现的模式
     if (bodyModeSel.value !== 'AUTO') {
       bodyMode.value = bodyModeSel.value
@@ -4318,8 +5438,13 @@ const open = async (record?: EtlPipeline, defaultFolderId?: string) => {
     syncKingdeeLoginBody()
     syncKingdeeQueryToBody()
     rebuildFieldRows()
+    // 新建 MySQL 流程没有 FieldKeys，别把金蝶向导里的默认字段带进抽取清单
+    if (formData.value.sourceType === 'MYSQL') {
+      fieldRows.value = []
+    }
     loadFilter()
     loadSyncConfig()
+    loadYunbiaoFilter()
     // 新建流程时自动套用已保存凭证，省去每次手填
     await loadCredentialSilently()
   }
@@ -4333,7 +5458,13 @@ const handleBack = () => {
   emit('back')
 }
 
-const handleReset = () => {
+const handleReset = async () => {
+  // 编辑态：放弃本次改动，重新载入库里已保存的配置
+  if (isEdit.value && originalRecord.value) {
+    await open(originalRecord.value)
+    message.success('已恢复为上次保存的配置')
+    return
+  }
   if (!isEdit.value) {
     formData.value = initialFormData()
     kingdeeQuery.value = defaultKingdeeQuery()
@@ -4355,9 +5486,20 @@ const handleReset = () => {
 const prepareDataBeforeSave = () => {
   bodySaveWarning.value = ''
   if (formData.value.sourceType === 'WEB_API') {
+    // 云表：表单名称不能是金蝶接口地址（历史脏数据就是这么写进去的）
+    if (isYunbiaoConn.value && String(formData.value.apiUrl || '').includes('/k3cloud/')) {
+      throw new Error('「表单名称」里是金蝶接口地址，请改成云表表单名称（如 表结合数采明细_IOT）')
+    }
     // 服务地址的装配名分隔符纠正为逗号，避免保存后运行时报 "no found"
     formData.value.apiUrl = normalizeK3Url(formData.value.apiUrl || '')
-    if (formData.value.apiAuthType === 'KINGDEE_K3') {
+    // 报文里出现 formJson 就是云表报文（金蝶没有这个字段）：一律按原文保存，
+    // 不管 apiAuthType 是什么，都不能用金蝶模板覆盖它
+    const yunbiaoBody = /"formJson"\s*:/.test(formData.value.apiBody || '')
+    if (selectedApiConn.value || yunbiaoBody) {
+      // 鉴权由连接提供：报文按用户填的原样保存。
+      // 不能走下面的金蝶模板重建——云表的 formJson / Model 会被冲成标准报文
+      formData.value.apiAuthConfig = ''
+    } else if (formData.value.apiAuthType === 'KINGDEE_K3') {
       syncKingdeeLoginBody()
       // 请求体优先用户手改的原文：结构识别不出来时绝不回写向导字段，
       // 否则会把粘贴进来的第二种报文（parameters 等）覆盖回旧的 data 报文
@@ -4381,9 +5523,27 @@ const prepareDataBeforeSave = () => {
     // 分页配置只在启用时落库，避免残留旧配置
     syncPagination()
   } else {
-    // 非 WebAPI 源不使用字段清单，清空避免残留类型影响临时表
-    formData.value.fieldMeta = ''
+    // MySQL 源：字段来自「解析 SQL 字段」，随流程落库，供映射/建表/临时表类型使用
+    formData.value.fieldMeta = fieldRows.value.length ? fieldRowsToMetaJson(fieldRows.value) : ''
+    // 变量定义 / 循环取数统一落在 filter_meta，保存时以当前面板值为准
+    formData.value.filterMeta = buildFilterMeta()
   }
+  // 增量同步配置统一由 syncConfig 序列化：旧格式（窗口天数）在打开时已折算成起点表达式，
+  // 这里落库成新结构，避免下次又要再折算一次
+  if (formData.value.writeMode === 'SYNC') {
+    syncSyncConfig()
+  }
+}
+
+/**
+ * 保存成功后的收尾：
+ * 1) 把当前表单值作为「重置」基线，否则重置会回到更早的旧值；
+ * 2) 显式暂存时通知父级刷新列表/左树，避免返回后仍从旧行打开
+ *    （静默暂存由「返回」时的刷新兜底，不重复请求）。
+ */
+const markSaved = (silent: boolean) => {
+  originalRecord.value = { ...formData.value } as EtlPipeline
+  if (!silent) emit('saved')
 }
 
 // 暂存当前步骤进度 (草稿保存，随时可存)
@@ -4411,6 +5571,7 @@ const handleSaveStep = async (silent = false): Promise<boolean> => {
       formData.value.pipelineCode = saved.pipelineCode
       isEdit.value = true
     }
+    markSaved(silent)
     if (bodySaveWarning.value) {
       message.warning(bodySaveWarning.value)
     } else if (!silent) {
@@ -4462,6 +5623,8 @@ const handleCompleteSave = async () => {
       id: currentId.value ? currentId.value : undefined
     }
     await saveStepPipeline(payload)
+    // 全量保存同样要更新「重置」基线
+    originalRecord.value = { ...formData.value } as EtlPipeline
     if (bodySaveWarning.value) {
       message.warning(bodySaveWarning.value)
     } else {
@@ -4546,6 +5709,18 @@ defineExpose({ open })
   color: #8c8c8c;
 }
 
+/* 「请求体 Body」标签行：标题左、格式化按钮右 */
+.body-form-item :deep(.ant-form-item-label > label) {
+  width: 100%;
+}
+.body-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+
 .quick-chip {
   cursor: pointer;
   user-select: none;
@@ -4565,98 +5740,6 @@ defineExpose({ open })
   border-top: 1px solid #f0f0f0;
 }
 
-/* 顶部两步抽取流程图可视化 */
-.api-flow-pipeline {
-  display: flex;
-  align-items: center;
-  background: #f6f8fb;
-  border: 1px solid #e1e7f0;
-  border-radius: 8px;
-  padding: 14px 18px;
-  margin-bottom: 16px;
-  gap: 12px;
-}
-
-.flow-step-node {
-  display: flex;
-  align-items: center;
-  background: #ffffff;
-  border: 1px solid #d9d9d9;
-  border-radius: 6px;
-  padding: 8px 12px;
-  gap: 10px;
-  flex: 1;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-}
-
-.flow-step-node.active {
-  border-color: #1677ff;
-  background: #f0f7ff;
-}
-
-.flow-step-node .node-icon {
-  font-size: 18px;
-  color: #1677ff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  background: #e6f4ff;
-  border-radius: 50%;
-}
-
-.flow-step-node .node-text {
-  flex: 1;
-}
-
-.flow-step-node .node-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #1f1f1f;
-  margin-bottom: 2px;
-}
-
-.flow-step-node .node-desc {
-  font-size: 11px;
-  color: #8c8c8c;
-}
-
-.flow-step-arrow {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-width: 130px;
-}
-
-.flow-step-arrow .arrow-line {
-  width: 100%;
-  height: 2px;
-  background: #1677ff;
-  position: relative;
-}
-
-.flow-step-arrow .arrow-line::after {
-  content: '';
-  position: absolute;
-  right: 0;
-  top: -4px;
-  border-left: 6px solid #1677ff;
-  border-top: 5px solid transparent;
-  border-bottom: 5px solid transparent;
-}
-
-.flow-step-arrow .arrow-badge {
-  font-size: 11px;
-  color: #1677ff;
-  background: #ffffff;
-  border: 1px solid #b5d5ff;
-  border-radius: 10px;
-  padding: 1px 8px;
-  margin-top: 4px;
-  white-space: nowrap;
-}
 
 .module-card {
   border: 1px solid #e8e8e8;
@@ -4714,6 +5797,22 @@ defineExpose({ open })
   font-size: 12px;
   color: #8c8c8c;
   line-height: 1.6;
+}
+
+/* MySQL 源：字段清单标题 + 解析按钮同一行 */
+.field-list-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  line-height: 1.4;
+}
+
+/* 字段标识换算后的列名提示 */
+.fk-col-hint {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #8c8c8c;
+  line-height: 1.4;
 }
 
 /* 请求体手工编辑 / 结构无法识别时的提示 */
@@ -4831,6 +5930,11 @@ defineExpose({ open })
 .fk-mono {
   font-family: Consolas, Monaco, monospace;
   font-size: 12px;
+}
+
+/* 校验结果里标红的问题字段名 */
+.fk-bad {
+  color: #cf1322;
 }
 
 .kf-raw {
