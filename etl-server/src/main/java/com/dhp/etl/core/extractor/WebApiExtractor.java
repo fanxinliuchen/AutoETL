@@ -157,24 +157,61 @@ public class WebApiExtractor {
         List<String> fieldKeys = parseFieldKeysFromRequestBody(requestBody);
         if (pagination != null) {
             // 会话失效自动重登：金蝶 Cookie 有固定有效期（实测约 30 分钟），
-            // 大表翻页跑到一半会失效；重登后从当前页续跑，避免整批失败
-            Runnable reAuth = () -> {
-                headers.remove("Cookie");
-                applyAuth(pipeline, headers, logBuffer);
-            };
+            // 大表翻页跑到一半会失效；重登前必须清连接缓存，否则仍会拿到已失效的旧 Cookie
+            Runnable reAuth = () -> reAuth(pipeline, headers, logBuffer);
             return extractPaged(requestBody, headers, apiUrl, method, jsonPath, pagination, logBuffer,
                     fieldKeys, pipeline.getFieldMeta(), false, reAuth, rowConsumer);
         }
 
-        String body = sendWithRetry("单次请求", apiUrl, method, headers, requestBody, false, logBuffer);
-        logBuffer.append(String.format("[WebAPI] 响应成功，数据长度: %d 字符\n", body != null ? body.length() : 0));
-
-        List<Map<String, Object>> records = parseRecords(body, jsonPath, fieldKeys, pipeline.getFieldMeta(), logBuffer);
-        logBuffer.append(String.format("[WebAPI] JsonPath (%s) 抽取解析得到: %d 条记录\n", jsonPath, records.size()));
+        List<Map<String, Object>> records;
+        try {
+            records = fetchSinglePage(apiUrl, method, headers, requestBody, jsonPath, fieldKeys,
+                    pipeline.getFieldMeta(), logBuffer);
+        } catch (BizException be) {
+            if (!isSessionExpired(be.getMessage())) {
+                throw be;
+            }
+            logBuffer.append(String.format(
+                    "[WebAPI] 单次请求会话已失效（%s），重新登录后重试\n",
+                    StrUtil.brief(StrUtil.nullToEmpty(be.getMessage()), 100)));
+            reAuth(pipeline, headers, logBuffer);
+            records = fetchSinglePage(apiUrl, method, headers, requestBody, jsonPath, fieldKeys,
+                    pipeline.getFieldMeta(), logBuffer);
+        }
         if (!records.isEmpty()) {
             rowConsumer.accept(records, logBuffer);
         }
         return records.size();
+    }
+
+    private List<Map<String, Object>> fetchSinglePage(String apiUrl,
+                                                      String method,
+                                                      Map<String, String> headers,
+                                                      String requestBody,
+                                                      String jsonPath,
+                                                      List<String> fieldKeys,
+                                                      String fieldMeta,
+                                                      StringBuilder logBuffer) {
+        String body = sendWithRetry("单次请求", apiUrl, method, headers, requestBody, false, logBuffer);
+        logBuffer.append(String.format("[WebAPI] 响应成功，数据长度: %d 字符\n", body != null ? body.length() : 0));
+
+        List<Map<String, Object>> records = parseRecords(body, jsonPath, fieldKeys, fieldMeta, logBuffer);
+        logBuffer.append(String.format("[WebAPI] JsonPath (%s) 抽取解析得到: %d 条记录\n", jsonPath, records.size()));
+        return records;
+    }
+
+    /**
+     * 强制重登：先清连接级会话缓存再重新鉴权。
+     *
+     * <p>不能只删请求头里的 Cookie：不 invalidate 缓存时，ConnectionManager 会命中未到
+     * 本地空闲阈值的旧会话、把已失效的 Cookie 原样返回并续期，导致重试永远拿到同一条死会话。
+     */
+    void reAuth(EtlPipeline pipeline, Map<String, String> headers, StringBuilder logBuffer) {
+        if (pipeline.getSourceDsId() != null) {
+            connectionManager.invalidate(pipeline.getSourceDsId());
+        }
+        headers.remove("Cookie");
+        applyAuth(pipeline, headers, logBuffer);
     }
 
     /**
@@ -541,7 +578,7 @@ public class WebApiExtractor {
     /**
      * @param formBody true 表示按 formData 提交（云表：只有一个 queryParams 字段，值是压缩 JSON 字符串）
      */
-    private String sendOnce(String apiUrl, String method, Map<String, String> headers, String body, boolean formBody) {
+    String sendOnce(String apiUrl, String method, Map<String, String> headers, String body, boolean formBody) {
         HttpRequest request = "POST".equals(method) ? HttpRequest.post(apiUrl) : HttpRequest.get(apiUrl);
         if (!headers.isEmpty()) {
             request.addHeaders(headers);
