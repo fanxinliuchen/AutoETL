@@ -4,6 +4,7 @@ import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.dhp.common.base.BaseCrudServiceImpl;
 import com.dhp.common.exception.BizException;
 import com.dhp.common.result.ErrorCode;
@@ -74,13 +75,15 @@ public class EtlPipelineServiceImpl extends BaseCrudServiceImpl<EtlPipelineMappe
     @Override
     public boolean updatePipeline(EtlPipeline pipeline) {
         normalizeJsonColumns(pipeline);
-        // 1. 业务编码与版本号同步
+        // 1. 业务编码、版本号与只读运行态同步：保存配置不能用客户端旧快照把最近运行状态/时间倒退覆盖
         EtlPipeline old = this.getById(pipeline.getId());
         if (old != null) {
             if (StrUtil.isBlank(pipeline.getPipelineCode())) {
                 pipeline.setPipelineCode(old.getPipelineCode());
             }
             pipeline.setObjectVersion(old.getObjectVersion());
+            pipeline.setLastRunStatus(old.getLastRunStatus());
+            pipeline.setLastRunTime(old.getLastRunTime());
         }
 
         if (StrUtil.isNotBlank(pipeline.getPipelineCode())) {
@@ -102,6 +105,17 @@ public class EtlPipelineServiceImpl extends BaseCrudServiceImpl<EtlPipelineMappe
             }
         }
         return ok;
+    }
+
+    @Override
+    public void updateLastRun(Long id, String lastRunStatus, Date lastRunTime) {
+        if (id == null) {
+            return;
+        }
+        this.update(new LambdaUpdateWrapper<EtlPipeline>()
+                .eq(EtlPipeline::getId, id)
+                .set(EtlPipeline::getLastRunStatus, lastRunStatus)
+                .set(EtlPipeline::getLastRunTime, lastRunTime));
     }
 
     @Override

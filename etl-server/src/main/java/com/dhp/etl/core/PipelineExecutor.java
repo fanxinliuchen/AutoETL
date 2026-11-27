@@ -268,8 +268,9 @@ public class PipelineExecutor {
             instance.setLogDetail(logBuffer.toString());
             instanceService.updateById(instance);
 
-            pipeline.setLastRunTime(end);
-            pipelineService.updateById(pipeline);
+            // 定向只更新最近运行状态与时间：避免运行期间配置被编辑导致 object_version 变化，
+            // 使 updateById 被乐观锁静默丢弃或把并发配置覆盖回去
+            pipelineService.updateLastRun(pipelineId, pipeline.getLastRunStatus(), end);
         }
     }
 
